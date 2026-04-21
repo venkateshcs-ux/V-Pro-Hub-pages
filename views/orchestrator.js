@@ -12,6 +12,38 @@ window.OrchestratorView = (() => {
 
   const PRIORITY_ORDER = { 'SUPER HIGH': 0, 'HIGH': 1, 'Medium': 2, 'Low': 3 };
 
+  // ── Tool → URL map (#62) ───────────────────────
+  // For recognisable web-launchable tools, render "Open {Label} ↗" on the
+  // Next Step card. First rule that matches a case-insensitive pattern wins.
+  // Local-only tools (CLIs, desktop apps without deep links) are intentionally
+  // excluded — no button is shown for them.
+  //
+  // Rule shape: { test: RegExp (matched against raw "Tool:" value), label, url }
+  // Order matters: put more specific rules (e.g. "Claude Design") before
+  // broader ones (e.g. "Claude"). Pure local tools like "Claude Code" are
+  // omitted so no misleading button appears.
+  const TOOL_OPEN_RULES = [
+    { test: /claude\s*design/i,      label: 'Claude Design', url: 'https://claude.ai/' },
+    { test: /claude\.?ai|claude\s*chat|claude\s*web/i, label: 'Claude.ai',  url: 'https://claude.ai/' },
+    { test: /perplexity/i,           label: 'Perplexity',    url: 'https://www.perplexity.ai/' },
+    { test: /figma/i,                label: 'Figma',         url: 'https://www.figma.com/' },
+    { test: /runway/i,               label: 'Runway',        url: 'https://app.runwayml.com/' },
+    { test: /chatgpt|\bgpt[- ]?\d?\b/i, label: 'ChatGPT',    url: 'https://chatgpt.com/' },
+    { test: /notion/i,               label: 'Notion',        url: 'https://www.notion.so/' },
+    { test: /gemini|google\s*ai/i,   label: 'Gemini',        url: 'https://gemini.google.com/' },
+    // Fallback generic Claude LAST — avoids clobbering "Claude Code" (local CLI,
+    // no rule → no button) while still matching plain "Claude" references.
+    { test: /^\s*claude\s*(?:\(|,|$)/i, label: 'Claude.ai',  url: 'https://claude.ai/' },
+  ];
+
+  function resolveToolOpen(toolValue) {
+    if (!toolValue) return null;
+    for (const rule of TOOL_OPEN_RULES) {
+      if (rule.test.test(toolValue)) return { label: rule.label, url: rule.url };
+    }
+    return null;
+  }
+
   // ── Parse BACKLOG.md ───────────────────────────
   // Returns array of { id, name, priority, status, feedPath }
   // feedPath is null if missing or TBD
@@ -171,6 +203,7 @@ window.OrchestratorView = (() => {
 
     const exception    = ns['Exception'];
     const showException = exception && !/^no\b/i.test(exception);
+    const openTool      = resolveToolOpen(ns['Tool']);
 
     return `<div class="next-step-box">
       <div class="nsb-label">Next Step</div>
@@ -183,6 +216,12 @@ window.OrchestratorView = (() => {
         <div class="nsb-row nsb-exception">
           <span class="nsb-key">Exception</span>
           <span class="nsb-val">${escHtml(exception)}</span>
+        </div>` : ''}
+      ${openTool ? `
+        <div class="nsb-actions">
+          <a class="nsb-open-tool" href="${escHtml(openTool.url)}" target="_blank" rel="noopener noreferrer" title="Open ${escHtml(openTool.label)} in a new tab">
+            Open ${escHtml(openTool.label)} ↗
+          </a>
         </div>` : ''}
     </div>`;
   }

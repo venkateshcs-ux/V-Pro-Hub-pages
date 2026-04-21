@@ -6,6 +6,7 @@ window.BacklogView = (() => {
 
   let _filter            = 'All';
   let _sessionTypeFilter = 'All';
+  let _searchQuery       = '';
   let _items             = [];
   let _products          = [];
   let _sessionTypes      = [];
@@ -95,10 +96,23 @@ window.BacklogView = (() => {
   // ── Filter items ───────────────────────────────
 
   function filteredItems() {
+    const q = _searchQuery.trim().toLowerCase();
     return _items.filter(i => {
       const matchProduct = _filter === 'All' || i.products.includes(_filter);
       const matchSession = _sessionTypeFilter === 'All' || i.sessionType === _sessionTypeFilter;
-      return matchProduct && matchSession;
+      if (!q) return matchProduct && matchSession;
+      // Strip a leading '#' so queries like "#62" work
+      const qClean = q.replace(/^#/, '');
+      const hay = [
+        '#' + i.id,
+        i.id,
+        i.name,
+        i.products.join(' '),
+        i.type,
+        i.sessionType,
+        i.status
+      ].join(' ').toLowerCase();
+      return matchProduct && matchSession && hay.includes(qClean);
     });
   }
 
@@ -135,6 +149,23 @@ window.BacklogView = (() => {
         <span class="summary-num done">${done.length}</span>
         <span class="summary-label">Done</span>
       </div>
+    </div>`;
+  }
+
+  // ── Search input ───────────────────────────────
+
+  function renderSearch() {
+    const val = escHtml(_searchQuery);
+    return `<div class="backlog-search">
+      <input
+        type="search"
+        id="backlog-search-input"
+        class="backlog-search-input"
+        placeholder="Search backlog — name, #id, product, status…"
+        value="${val}"
+        autocomplete="off"
+        spellcheck="false" />
+      ${_searchQuery ? `<button type="button" class="backlog-search-clear" id="backlog-search-clear" title="Clear search">✕</button>` : ''}
     </div>`;
   }
 
@@ -252,6 +283,58 @@ window.BacklogView = (() => {
       ` : ''}`;
   }
 
+  // ── Wire search input ──────────────────────────
+
+  function wireSearch(container) {
+    const input = container.querySelector('#backlog-search-input');
+    if (!input) return;
+
+    const applyFilter = () => {
+      _searchQuery = input.value || '';
+      // Toggle the clear button without re-rendering the input (preserves focus + caret)
+      let clearBtn = container.querySelector('#backlog-search-clear');
+      if (_searchQuery && !clearBtn) {
+        clearBtn = document.createElement('button');
+        clearBtn.type = 'button';
+        clearBtn.className = 'backlog-search-clear';
+        clearBtn.id = 'backlog-search-clear';
+        clearBtn.title = 'Clear search';
+        clearBtn.textContent = '✕';
+        clearBtn.addEventListener('click', () => {
+          input.value = '';
+          _searchQuery = '';
+          clearBtn.remove();
+          container.querySelector('#backlog-items').innerHTML = renderItemsSection(filteredItems());
+          input.focus();
+        });
+        input.parentNode.appendChild(clearBtn);
+      } else if (!_searchQuery && clearBtn) {
+        clearBtn.remove();
+      }
+      container.querySelector('#backlog-items').innerHTML = renderItemsSection(filteredItems());
+    };
+
+    input.addEventListener('input', applyFilter);
+    // Esc clears
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && input.value) {
+        e.preventDefault();
+        input.value = '';
+        applyFilter();
+      }
+    });
+
+    // Wire the initial clear button if it was rendered server-side
+    const initialClear = container.querySelector('#backlog-search-clear');
+    if (initialClear) {
+      initialClear.addEventListener('click', () => {
+        input.value = '';
+        applyFilter();
+        input.focus();
+      });
+    }
+  }
+
   // ── Wire filter pills ──────────────────────────
 
   function wirePills(container) {
@@ -326,18 +409,21 @@ window.BacklogView = (() => {
       _sessionTypes      = extractSessionTypes(_items);
       _filter            = 'All';
       _sessionTypeFilter = 'All';
+      _searchQuery       = '';
 
       container.innerHTML = `
         <div class="backlog-header">
           <h1 class="backlog-title">Backlog</h1>
           <p class="muted" style="font-size:13px;margin-top:2px">${_items.length} items across all products</p>
         </div>
+        ${renderSearch()}
         ${renderPills(_products)}
         ${renderSessionTypePills(_sessionTypes)}
         <div id="backlog-items">
           ${renderItemsSection(filteredItems())}
         </div>`;
 
+      wireSearch(container);
       wirePills(container);
 
     } catch (err) {
