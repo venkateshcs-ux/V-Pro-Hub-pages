@@ -126,28 +126,27 @@ window.BacklogView = (() => {
     const low    = open.filter(i => i.priority === 'Low');
     const done   = items.filter(isDone);
 
-    return `<div class="backlog-summary">
-      <div class="summary-stat">
-        <span class="summary-num">${open.length}</span>
-        <span class="summary-label">Open</span>
+    return `<div class="bl-sb">
+      <div class="bl-sb-tile lead">
+        <div class="bl-sb-num">${open.length}<span class="bl-sb-unit">items</span></div>
+        <div class="bl-sb-lbl">Open</div>
       </div>
-      <div class="summary-divider"></div>
-      <div class="summary-stat">
-        <span class="summary-num high">${high.length}</span>
-        <span class="summary-label">HIGH</span>
+      <div class="bl-sb-tile lead danger">
+        <div class="bl-sb-num">${high.length}<span class="bl-sb-unit">items</span></div>
+        <div class="bl-sb-lbl">High priority</div>
       </div>
-      <div class="summary-stat">
-        <span class="summary-num medium">${medium.length}</span>
-        <span class="summary-label">Medium</span>
+      <div class="bl-sb-divider"></div>
+      <div class="bl-sb-tile ctx">
+        <div class="bl-sb-ctx-wrap">
+          <div class="bl-sb-num">${medium.length}<span class="bl-sb-unit">med</span></div>
+          <div class="bl-sb-sub">${low.length} low</div>
+        </div>
       </div>
-      <div class="summary-stat">
-        <span class="summary-num low">${low.length}</span>
-        <span class="summary-label">Low</span>
-      </div>
-      <div class="summary-divider"></div>
-      <div class="summary-stat">
-        <span class="summary-num done">${done.length}</span>
-        <span class="summary-label">Done</span>
+      <div class="bl-sb-tile ctx">
+        <div class="bl-sb-ctx-wrap">
+          <div class="bl-sb-num">${done.length}<span class="bl-sb-unit">done</span></div>
+          <div class="bl-sb-sub">this cycle</div>
+        </div>
       </div>
     </div>`;
   }
@@ -169,29 +168,33 @@ window.BacklogView = (() => {
     </div>`;
   }
 
-  // ── Product filter pills ───────────────────────
+  // ── Filter area — two visually distinct axes ───
 
-  function renderPills(products) {
-    const all = ['All', ...products];
-    return `<div class="session-filters" id="backlog-pills">
-      ${all.map(p => `
-        <button class="filter-pill ${p === _filter ? 'active' : ''}" data-product="${p}">
-          ${escHtml(p)}
-        </button>`).join('')}
-    </div>`;
-  }
+  function renderFilterArea(products, types) {
+    const allProducts = ['All', ...products];
+    const tabs = allProducts.map(p => {
+      const count = p === 'All' ? _items.length : _items.filter(i => i.products.includes(p)).length;
+      return `<button class="bl-fa-tab${p === _filter ? ' active' : ''}" data-product="${escHtml(p)}">${escHtml(p)}<span class="bl-fa-count">${count}</span></button>`;
+    }).join('');
 
-  // ── Session Type filter pills ──────────────────
+    let sessionRow = '';
+    if (types.length) {
+      const allTypes = ['All', ...types];
+      const chips = allTypes.map(t =>
+        `<button class="bl-fa-chip${t === _sessionTypeFilter ? ' active' : ''}" data-stype="${escHtml(t)}"><span class="bl-fa-dot"></span>${escHtml(t)}</button>`
+      ).join('');
+      sessionRow = `<div class="bl-fa-axis">
+        <div class="bl-fa-axis-label">Session</div>
+        <div class="bl-fa-chips" id="bl-stype-chips">${chips}</div>
+      </div>`;
+    }
 
-  function renderSessionTypePills(types) {
-    if (!types.length) return '';
-    const all = ['All', ...types];
-    return `<div class="session-filters stype-filters" id="stype-pills">
-      <span class="filter-label">Session type</span>
-      ${all.map(t => `
-        <button class="filter-pill stype-pill ${sessionTypeClass(t)} ${t === _sessionTypeFilter ? 'active' : ''}" data-stype="${t}">
-          ${escHtml(t)}
-        </button>`).join('')}
+    return `<div class="bl-fa" id="bl-filter-area">
+      <div class="bl-fa-axis">
+        <div class="bl-fa-axis-label">Product</div>
+        <div class="bl-fa-tabs" id="backlog-pills">${tabs}</div>
+      </div>
+      ${sessionRow}
     </div>`;
   }
 
@@ -238,25 +241,31 @@ window.BacklogView = (() => {
 
   function renderItem(item) {
     const done = item.status.includes('Done') || item.status.includes('✓');
-    return `
-    <div class="backlog-item ${done ? 'item-done' : ''}">
-      <div class="item-id">#${escHtml(item.id)}</div>
-      <div class="item-body">
-        <span class="item-name ${done ? 'item-name-done' : ''}">${inline(item.name)}</span>
-        <div class="item-meta">
-          ${renderProductTags(item.products)}
-          <span class="item-type">${escHtml(item.type)}</span>
-          ${item.sessionType && item.sessionType !== '—'
-            ? `<span class="item-stype ${sessionTypeClass(item.sessionType)}">${escHtml(item.sessionType)}</span>`
-            : ''}
-          <span class="item-phase">Phase ${escHtml(item.phase)}</span>
+    const prioClass = { HIGH: 'prio-high', Medium: 'prio-med', Low: 'prio-low' }[item.priority] || 'prio-low';
+    const railClass = { HIGH: 'rail-high', Medium: 'rail-med', Low: 'rail-low' }[item.priority] || '';
+    const sClass = done ? 'status-done'
+      : item.status.includes('Progress') ? 'status-progress'
+      : item.status.includes('Blocked')  ? 'status-block'
+      : 'status-open';
+    const statusText = done ? 'Done ✓' : item.status.replace(' ▶', '').replace(' ⏸', '');
+    const tags = item.products.map(p => `<span class="bl-ic-tag">${escHtml(p)}</span>`).join('');
+    const infoBtn = (item.aiTool && item.aiTool !== '—')
+      ? `<span class="bl-ic-info" title="${escHtml(item.aiTool)}">i</span>`
+      : '';
+    return `<div class="bl-ic ${railClass}${done ? ' item-done' : ''}">
+      <div class="bl-ic-head">
+        <div class="bl-ic-name">${inline(item.name)}</div>
+        <div class="bl-ic-meta">
+          <span class="bl-ic-id">#${escHtml(item.id)}</span>
+          <span class="bl-ic-sep">·</span>
+          ${tags}
+          ${infoBtn}
         </div>
       </div>
-      <span class="item-priority ${priorityClass(item.priority)}">${escHtml(item.priority)}</span>
-      <span class="item-status ${statusClass(item.status)}">${escHtml(item.status)}</span>
-      ${item.aiTool && item.aiTool !== '—'
-        ? `<span class="item-ai-tool" title="Built with ${escHtml(item.aiTool)}">${escHtml(shortAiTool(item.aiTool))}</span>`
-        : '<span class="item-ai-tool item-ai-tool-empty">—</span>'}
+      <div class="bl-ic-glance">
+        <span class="bl-chip ${prioClass}"><span class="bl-chip-dot"></span>${escHtml(item.priority === 'HIGH' ? 'High' : item.priority)}</span>
+        <span class="bl-chip ${sClass}"><span class="bl-chip-dot"></span>${escHtml(statusText)}</span>
+      </div>
     </div>`;
   }
 
@@ -338,21 +347,19 @@ window.BacklogView = (() => {
   // ── Wire filter pills ──────────────────────────
 
   function wirePills(container) {
-    // Product pills
-    container.querySelectorAll('#backlog-pills .filter-pill').forEach(btn => {
+    container.querySelectorAll('#backlog-pills .bl-fa-tab').forEach(btn => {
       btn.addEventListener('click', () => {
         _filter = btn.dataset.product;
-        container.querySelectorAll('#backlog-pills .filter-pill').forEach(b =>
+        container.querySelectorAll('#backlog-pills .bl-fa-tab').forEach(b =>
           b.classList.toggle('active', b.dataset.product === _filter)
         );
         container.querySelector('#backlog-items').innerHTML = renderItemsSection(filteredItems());
       });
     });
-    // Session type pills
-    container.querySelectorAll('#stype-pills .filter-pill').forEach(btn => {
+    container.querySelectorAll('#bl-stype-chips .bl-fa-chip').forEach(btn => {
       btn.addEventListener('click', () => {
         _sessionTypeFilter = btn.dataset.stype;
-        container.querySelectorAll('#stype-pills .filter-pill').forEach(b =>
+        container.querySelectorAll('#bl-stype-chips .bl-fa-chip').forEach(b =>
           b.classList.toggle('active', b.dataset.stype === _sessionTypeFilter)
         );
         container.querySelector('#backlog-items').innerHTML = renderItemsSection(filteredItems());
@@ -368,19 +375,27 @@ window.BacklogView = (() => {
       <h1 class="backlog-title">Backlog</h1>
       <p class="muted" style="font-size:13px">Loading…</p>
     </div>
-    <div class="session-filters">
-      ${['All','…','…'].map(l => `<button class="filter-pill">${l}</button>`).join('')}
-    </div>
-    ${[1,2,3].map(() => `
-      <div class="backlog-item">
-        <div class="skel-line" style="width:36px;height:12px"></div>
-        <div class="item-body">
-          <div class="skel-line" style="width:55%;height:13px"></div>
-          <div class="skel-line" style="width:30%;height:10px;margin-top:6px"></div>
+    <div class="bl-fa">
+      <div class="bl-fa-axis">
+        <div class="bl-fa-axis-label">Product</div>
+        <div class="bl-fa-tabs">
+          ${['All','…','…'].map(l => `<button class="bl-fa-tab">${l}</button>`).join('')}
         </div>
-        <div class="skel-line" style="width:48px;height:20px;border-radius:10px"></div>
-        <div class="skel-line" style="width:60px;height:20px;border-radius:10px"></div>
-      </div>`).join('')}`;
+      </div>
+    </div>
+    <div class="backlog-list">
+      ${[1,2,3].map(() => `
+        <div class="bl-ic">
+          <div class="bl-ic-head">
+            <div class="skel-line" style="width:55%;height:13px"></div>
+            <div class="skel-line" style="width:30%;height:10px;margin-top:6px"></div>
+          </div>
+          <div class="bl-ic-glance">
+            <div class="skel-line" style="width:48px;height:20px;border-radius:10px"></div>
+            <div class="skel-line" style="width:60px;height:20px;border-radius:10px"></div>
+          </div>
+        </div>`).join('')}
+    </div>`;
   }
 
   // ── Main render ────────────────────────────────
@@ -417,8 +432,7 @@ window.BacklogView = (() => {
           <p class="muted" style="font-size:13px;margin-top:2px">${_items.length} items across all products</p>
         </div>
         ${renderSearch()}
-        ${renderPills(_products)}
-        ${renderSessionTypePills(_sessionTypes)}
+        ${renderFilterArea(_products, _sessionTypes)}
         <div id="backlog-items">
           ${renderItemsSection(filteredItems())}
         </div>`;
