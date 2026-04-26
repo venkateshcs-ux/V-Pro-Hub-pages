@@ -104,6 +104,63 @@ class GitHubAdapter {
     }
   }
 
+
+  /** Get file content + sha (for SHA-guarded writeback) */
+  async getFileWithSha(owner, repo, path) {
+    try {
+      const data = await this._request(`/repos/${owner}/${repo}/contents/${path}`);
+      if (data.encoding === 'base64') {
+        return {
+          content: GitHubAdapter._decodeBase64Utf8(data.content.replace(/\n/g, '')),
+          sha: data.sha,
+        };
+      }
+      return null;
+    } catch (e) {
+      if (e.message.includes('404')) return null;
+      throw e;
+    }
+  }
+
+  /** PUT file content (Contents API) — requires sha for updates; omit for new files.
+      Throws on 409 SHA conflict (someone else edited). */
+  async putFile(owner, repo, path, content, sha, message) {
+    const url = `${this._base}/repos/${owner}/${repo}/contents/${path}`;
+    const body = {
+      message: message || `Update ${path}`,
+      content: btoa(unescape(encodeURIComponent(content))),  // utf-8 → base64
+      branch: 'master',
+    };
+    if (sha) body.sha = sha;
+
+    const res = await fetch(url, {
+      method: 'PUT',
+      headers: { ...this._headers(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    if (res.status === 409) {
+      const e = new Error(`SHA conflict on ${path} — someone else edited this`);
+      e.code = 'sha_conflict';
+      e.status = 409;
+      throw e;
+    }
+    if (res.status === 401) throw new Error('GitHub 401 — PAT invalid or expired');
+    if (res.status === 403) throw new Error('GitHub 403 — rate limit or insufficient scopes (need `repo` write)');
+    if (res.status === 404) throw new Error(`GitHub 404 — not found: ${path}`);
+    if (!res.ok) {
+      let detail = '';
+      try { detail = (await res.json()).message || ''; } catch {}
+      throw new Error(`GitHub ${res.status} — putFile ${path}${detail ? ': ' + detail : ''}`);
+    }
+
+    const data = await res.json();
+    return {
+      sha: data.content.sha,
+      commitSha: data.commit.sha,
+    };
+  }
+
   /** Check current rate limit status */
   async getRateLimit() {
     const data = await this._request('/rate_limit');

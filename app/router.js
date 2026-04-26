@@ -2,20 +2,20 @@
 // Phase 1 — Vanilla JS, no framework
 
 const ROUTES = {
-  sprint:       { label: 'Sprint',       icon: '▶', built: true, step: '#38', desc: 'Active sprint — health, kanban, sessions', viewModule: 'SprintView' },
+  sprint:       { label: 'Sprint',       icon: '▶', built: true, step: '#38', desc: 'Active sprint — delegates to Backlog 2.0 with Sprint=Current preset', viewModule: 'SprintView' },
   orchestrator: { label: 'Orchestrator', icon: '⚡', built: true, step: '#35', desc: 'Multi-tool projects — next step per project', viewModule: 'OrchestratorView' },
   portfolio: { label: 'Portfolio',      icon: '◈', built: true, step: 'C3', desc: 'All products at a glance',    viewModule: 'PortfolioView' },
   product:   { label: 'Product Detail', icon: '◉', built: true, step: 'C4', desc: 'Drill into one product',      viewModule: 'ProductView'   },
   session:   { label: 'Session Log',    icon: '◎', built: true, step: 'C5', desc: 'Claude Code session history', viewModule: 'SessionView'   },
   context:   { label: 'Context Viewer', icon: '◍', built: true, step: 'C6', desc: 'CONTEXT.md reader',           viewModule: 'ContextView'   },
-  backlog:   { label: 'Backlog',        icon: '◐', built: true,  step: 'C8',  desc: 'Product backlog per repo',    viewModule: 'BacklogView'   },
+  backlog:   { label: 'Backlog',        icon: '◐', built: true,  step: 'C8',  desc: 'Backlog 2.0 — prioritization + sprint kanban + dashboard merger', viewModule: 'BacklogView'   },
   health:    { label: 'Health Check',   icon: '◑', built: true,  step: 'C11', desc: 'Product health at a glance',  viewModule: 'HealthView'    },
   architecture: { label: 'Architecture', icon: '◇', built: true, step: '#19', desc: 'Multi-provider architecture', viewModule: 'ArchitectureView' },
   investment: { label: 'AI Investment', icon: '◆', built: true, step: '#29', desc: 'Plan costs, tool ranking, break-even', viewModule: 'InvestmentView' },
   settings:  { label: 'Settings',       icon: '◌', built: true,  step: 'C7',  desc: 'PAT, preferences, intervals', viewModule: 'SettingsView'  },
 };
 
-const DEFAULT_ROUTE = 'sprint';
+const DEFAULT_ROUTE = 'backlog';
 
 // Parse hash into { routeKey, param }
 // Supports: #/portfolio, #/product/V-Pro-Hub

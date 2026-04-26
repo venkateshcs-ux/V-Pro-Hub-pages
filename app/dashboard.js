@@ -54,6 +54,9 @@ const Dashboard = (() => {
     if (!_token || _token === 'ghp_your_token_here') {
       setStatus('error', 'public mode');
       setUsername(_username);
+      // Backlog 2.0 + downstream views read body[data-mode='readonly'] to disable
+      // writeback affordances and show the read-only banner per Polished.html P1.
+      document.body.setAttribute('data-mode', 'readonly');
       console.info('[Dashboard] No PAT — running in public mode (read-only, unauthenticated)');
       return;
     }
@@ -75,6 +78,8 @@ const Dashboard = (() => {
     } catch (err) {
       state.error = err.message;
       setStatus('error', 'auth failed');
+      // Auth failure → fall back to read-only (writeback affordances disabled)
+      document.body.setAttribute('data-mode', 'readonly');
       console.error('[Dashboard] GitHub auth failed:', err.message);
     }
   }
