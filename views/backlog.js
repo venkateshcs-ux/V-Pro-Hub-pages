@@ -194,8 +194,11 @@ window.BacklogView = (() => {
     const active = sprints.find(s => s.status === 'active');
     if (!active) return null;
 
+    // Filename convention per AGILE.md §1.2: SP-YYYY-MM-DD.md (ISO start date)
+    // Display ID is SP-DDMonYY which differs — use start date for the file lookup.
+    const filename = active.start ? `SP-${active.start}.md` : `${active.id}.md`;
     let detailMd;
-    try { detailMd = await Repos.getFile(CONFIG.username, state.backlogRepo, `docs/sprints/${active.id}.md`); }
+    try { detailMd = await Repos.getFile(CONFIG.username, state.backlogRepo, `docs/sprints/${filename}`); }
     catch { return null; }
     if (!detailMd) return null;
 
