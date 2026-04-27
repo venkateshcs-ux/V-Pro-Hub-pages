@@ -822,7 +822,7 @@ window.BacklogView = (() => {
     const showKanban    = state.sprintFilter === 'Current' && state.vmMode === 'board' && state.activeSprint;
 
     container.innerHTML = `
-      ${renderReadOnlyBanner()}
+      ${isReadOnly() ? renderReadOnlyBanner() : ''}
       ${renderHeader()}
       ${renderSearch()}
       ${renderFilterArea()}
@@ -1323,7 +1323,8 @@ window.BacklogView = (() => {
 
   // ── Main render entry point ────────────────────
 
-  async function render(container, opts = {}) {
+  async function render(container, opts) {
+    opts = opts || {};
     // Allow callers (e.g. SprintView delegation) to preset state
     if (opts.sprintFilter) state.sprintFilter = opts.sprintFilter;
     if (opts.vmMode)       state.vmMode = opts.vmMode;
