@@ -102,6 +102,9 @@ window.BacklogView = (() => {
     backlogSha: null,          // current SHA of BACKLOG.md (for SHA-guarded writeback)
     backlogPath: 'docs/BACKLOG.md',
     backlogRepo: 'V-Pro-Hub',
+    // S037ext Track E — summary-tile-driven filters (click tile to toggle)
+    priorityFilter: null,      // null | 'high' | 'medium' | 'low'
+    statusFilter: null,        // null | 'open' | 'done'
   };
 
   // ── Parse BACKLOG.md ───────────────────────────
@@ -469,6 +472,21 @@ window.BacklogView = (() => {
       // 'Past' / 'range' would need sprint-history tracking — for v1, treat as 'All sprints'
       // (these filter values render but currently don't exclude further; future #NEW)
 
+      // S037ext Track E — Summary tile filters (priority + status)
+      if (state.priorityFilter) {
+        const isHigh = i.priority === 'HIGH' || i.priority === 'SUPER HIGH';
+        const isMed  = i.priority === 'Medium';
+        const isLow  = i.priority === 'Low';
+        if (state.priorityFilter === 'high' && !isHigh) return false;
+        if (state.priorityFilter === 'medium' && !isMed) return false;
+        if (state.priorityFilter === 'low' && !isLow) return false;
+      }
+      if (state.statusFilter) {
+        const isDone = /Done|✓/i.test(i.status) || i.status.toLowerCase() === 'closed';
+        if (state.statusFilter === 'open' && isDone) return false;
+        if (state.statusFilter === 'done' && !isDone) return false;
+      }
+
       if (q) {
         const hay = ['#'+i.id, i.id, i.name, i.products.join(' '), i.type, i.sessionType, i.status]
           .join(' ').toLowerCase();
@@ -540,14 +558,14 @@ window.BacklogView = (() => {
       </button>`;
     })();
 
-    const showVM = state.sprintFilter === 'Current';
-    const vmRow = showVM ? `<div class="bl-fa-axis" style="justify-content:flex-end">
+    // S037ext #90 — VM toggle now visible across all sprint filters (was: Current only)
+    const vmRow = `<div class="bl-fa-axis" style="justify-content:flex-end">
       <div style="flex:1"></div>
       <div class="bl-vm">
         <button class="bl-vm-btn${state.vmMode === 'list'  ? ' active' : ''}" data-vm="list"><span class="bl-vm-ic">▤</span> List</button>
         <button class="bl-vm-btn${state.vmMode === 'board' ? ' active' : ''}" data-vm="board"><span class="bl-vm-ic">▦</span> Board</button>
       </div>
-    </div>` : '';
+    </div>`;
 
     return `<div class="bl-fa" id="bl-filter-area">
       <div class="bl-fa-axis"><div class="bl-fa-axis-label">Product</div><div class="bl-fa-tabs" id="bl-product-tabs">${tabs}</div></div>
@@ -557,19 +575,36 @@ window.BacklogView = (() => {
     </div>`;
   }
 
+  // S037ext Track E — clickable summary tile factory.
+  // Each tile carries data-tile-key + active class when its filter is selected.
+  // Clicking toggles the filter (selecting → re-clicking clears).
   function renderSummary(items) {
     const isDone = i => /Done|✓/i.test(i.status) || i.status.toLowerCase() === 'closed';
+    // Counts come from the broader filter set (excluding tile-driven filters)
+    // so users see the "headroom" each tile would expand to. We compute them
+    // off `items` (already-filtered) for now — keeps things simple; tile counts
+    // reflect the visible scope after non-tile filters apply.
     const open = items.filter(i => !isDone(i));
     const high = open.filter(i => i.priority === 'HIGH' || i.priority === 'SUPER HIGH');
     const med  = open.filter(i => i.priority === 'Medium');
     const low  = open.filter(i => i.priority === 'Low');
     const done = items.filter(isDone);
+
+    // Active states
+    const isOpenSel = state.statusFilter === 'open';
+    const isHighSel = state.priorityFilter === 'high';
+    const isMedSel  = state.priorityFilter === 'medium';
+    const isLowSel  = state.priorityFilter === 'low';
+    const isDoneSel = state.statusFilter === 'done';
+
+    const cls = (base, active) => `${base}${active ? ' is-selected' : ''}`;
+
     return `<div class="bl-sb">
-      <div class="bl-sb-tile lead"><div class="bl-sb-num">${open.length}<span class="bl-sb-unit">items</span></div><div class="bl-sb-lbl">Open</div></div>
-      <div class="bl-sb-tile lead danger"><div class="bl-sb-num">${high.length}<span class="bl-sb-unit">items</span></div><div class="bl-sb-lbl">High priority</div></div>
+      <button class="${cls('bl-sb-tile lead', isOpenSel)}" data-tile-key="open" type="button" title="${isOpenSel ? 'Click to clear' : 'Click to filter to open items'}"><div class="bl-sb-num">${open.length}<span class="bl-sb-unit">items</span></div><div class="bl-sb-lbl">Open</div></button>
+      <button class="${cls('bl-sb-tile lead danger', isHighSel)}" data-tile-key="high" type="button" title="${isHighSel ? 'Click to clear' : 'Click to filter to high priority'}"><div class="bl-sb-num">${high.length}<span class="bl-sb-unit">items</span></div><div class="bl-sb-lbl">High priority</div></button>
       <div class="bl-sb-divider"></div>
-      <div class="bl-sb-tile ctx"><div class="bl-sb-ctx-wrap"><div class="bl-sb-num">${med.length}<span class="bl-sb-unit">med</span></div><div class="bl-sb-sub">${low.length} low</div></div></div>
-      <div class="bl-sb-tile ctx"><div class="bl-sb-ctx-wrap"><div class="bl-sb-num">${done.length}<span class="bl-sb-unit">done</span></div><div class="bl-sb-sub">this cycle</div></div></div>
+      <button class="${cls('bl-sb-tile ctx', isMedSel)}" data-tile-key="medium" type="button" title="${isMedSel ? 'Click to clear' : 'Click to filter to medium priority'}"><div class="bl-sb-ctx-wrap"><div class="bl-sb-num">${med.length}<span class="bl-sb-unit">med</span></div><span class="bl-sb-sub bl-sb-sub-btn ${isLowSel ? 'is-selected' : ''}" data-tile-key="low" role="button" tabindex="0" title="${isLowSel ? 'Click to clear' : 'Click to filter to low priority'}">${low.length} low</span></div></button>
+      <button class="${cls('bl-sb-tile ctx', isDoneSel)}" data-tile-key="done" type="button" title="${isDoneSel ? 'Click to clear' : 'Click to filter to items done this cycle'}"><div class="bl-sb-ctx-wrap"><div class="bl-sb-num">${done.length}<span class="bl-sb-unit">done</span></div><div class="bl-sb-sub">this cycle</div></div></button>
     </div>`;
   }
 
@@ -691,6 +726,16 @@ window.BacklogView = (() => {
     return `<span class="${cls}" data-reason-trigger data-id="${escHtml(item.id)}"${titleAttr}>${escHtml(txt)}${txt ? '<span class="bl-ic-reason-caret">▾</span>' : ''}</span>`;
   }
 
+  // #86 Sprint Priority badge — return 'P1'/'P2'/... if item is in active sprint's
+  // committed_items planItems list, else null.
+  function getSprintPriority(item) {
+    if (!state.activeSprint) return null;
+    const idNum = parseInt(item.id, 10);
+    const plan = state.activeSprint.planItems || [];
+    const row = plan.find(p => p.id === idNum);
+    return row ? row.priority : null;
+  }
+
   function renderItem(item) {
     const done = /Done|✓/i.test(item.status);
     const prioCls = { HIGH: 'prio-high', 'SUPER HIGH': 'prio-high', Medium: 'prio-med', Low: 'prio-low' }[item.priority] || 'prio-low';
@@ -705,12 +750,17 @@ window.BacklogView = (() => {
     const hasGripCls = isReadOnly() ? '' : ' has-grip';
     const grip = isReadOnly() ? '' : `<span class="bl-grip" draggable="true" data-id="${escHtml(item.id)}" title="Drag to reorder"><span class="bl-grip-glyph">⋮⋮</span></span>`;
 
+    // #86 — sprint priority badge (P1/P2/... when item is in active sprint's committed_items)
+    const sprintPrio = getSprintPriority(item);
+    const sprintPrioBadge = sprintPrio ? `<span class="bl-ic-sprint-prio" title="Sprint priority: ${escHtml(sprintPrio)}">${escHtml(sprintPrio)}</span>` : '';
+
     return `<div class="bl-ic ${railCls}${done ? ' item-done' : ''}${hasGripCls}${dropClass}" data-id="${escHtml(item.id)}">
       ${grip}
       ${renderRankCell(item)}
       <div class="bl-ic-head">
         <div class="bl-ic-name">${inline(item.name)}</div>
         <div class="bl-ic-meta">
+          ${sprintPrioBadge}
           <span class="bl-ic-id">#${escHtml(item.id)}</span>
           <span class="bl-ic-sep">·</span>
           ${tags}
@@ -819,7 +869,8 @@ window.BacklogView = (() => {
   function fullRender(container) {
     const items = filteredItems();
     const showSprintCtx = state.sprintFilter === 'Current' && state.activeSprint;
-    const showKanban    = state.sprintFilter === 'Current' && state.vmMode === 'board' && state.activeSprint;
+    // #90 — board view available across all sprint filters (S037ext); previously gated to Current+activeSprint
+    const showKanban    = state.vmMode === 'board';
 
     container.innerHTML = `
       ${isReadOnly() ? renderReadOnlyBanner() : ''}
@@ -837,7 +888,7 @@ window.BacklogView = (() => {
   // Update only the main canvas (faster than full render for filter changes)
   function updateCanvas(container) {
     const items = filteredItems();
-    const showKanban = state.sprintFilter === 'Current' && state.vmMode === 'board' && state.activeSprint;
+    const showKanban = state.vmMode === 'board';
     const canvas = container.querySelector('#bl-main-canvas');
     if (canvas) canvas.innerHTML = showKanban ? renderKanban(items) : renderItemsList(items);
     wireCanvasEvents(container);
@@ -878,15 +929,55 @@ window.BacklogView = (() => {
     container.querySelectorAll('#bl-sprint-chips .bl-fa-chip').forEach(btn => {
       btn.addEventListener('click', () => {
         state.sprintFilter = btn.dataset.sprint;
-        state.vmManual = false;
+        // S037ext #90 — don't force list mode when leaving Current; board now works for any filter.
+        // Only auto-flip TO board on entering Current (and only if user hasn't manually overridden).
         if (state.sprintFilter === 'Current' && !state.vmManual) state.vmMode = 'board';
-        else if (state.sprintFilter !== 'Current') state.vmMode = 'list';
         fullRender(container);
       });
     });
     // VM toggle
     container.querySelectorAll('.bl-vm-btn').forEach(btn => {
       btn.addEventListener('click', () => { state.vmMode = btn.dataset.vm; state.vmManual = true; fullRender(container); });
+    });
+    // S037ext Track E — Summary tile click → filter toggle
+    // Tile counts are derived from open items for high/med/low (per
+    // S035 design); priority-tile clicks imply statusFilter='open' so
+    // the visible result matches the displayed count.
+    // Low is a span (role=button) inside the medium tile because nested
+    // <button> would cause auto-closure and break the DOM. Keyboard
+    // support added explicitly.
+    container.querySelectorAll('.bl-sb [data-tile-key]').forEach(btn => {
+      // Add Enter/Space keyboard support for span-based buttons (low)
+      if (btn.tagName !== 'BUTTON') {
+        btn.addEventListener('keydown', e => {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); btn.click(); }
+        });
+      }
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        const key = btn.dataset.tileKey;
+        if (key === 'open') {
+          state.statusFilter = state.statusFilter === 'open' ? null : 'open';
+          // Re-clicking 'open' shouldn't kill priority filter — leave alone.
+        } else if (key === 'done') {
+          state.statusFilter = state.statusFilter === 'done' ? null : 'done';
+          // Done is exclusive with open; clear priorityFilter when entering done
+          // so user sees a clean done-this-cycle slice.
+          if (state.statusFilter === 'done') state.priorityFilter = null;
+        } else if (key === 'high' || key === 'medium' || key === 'low') {
+          state.priorityFilter = state.priorityFilter === key ? null : key;
+          // Match tile-count semantics: priority counts shown are open-only,
+          // so priority click implies status=open (unless user explicitly chose 'done').
+          if (state.priorityFilter && state.statusFilter !== 'done') {
+            state.statusFilter = 'open';
+          }
+          // Re-clicking same priority clears both implicit filters.
+          if (!state.priorityFilter && state.statusFilter === 'open') {
+            state.statusFilter = null;
+          }
+        }
+        fullRender(container);
+      });
     });
     // Range date inputs
     const rs = container.querySelector('#bl-range-start');

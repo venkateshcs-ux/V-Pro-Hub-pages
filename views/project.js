@@ -968,6 +968,129 @@ window.ProjectView = (() => {
     return s.length > n ? s.slice(0, n - 1) + '…' : s;
   }
 
+  // ── _FEED.md fallback (S037ext Track A) ────────
+  // Used when projects/<id>/state.md doesn't exist but _FEED.md does
+  // (project-not-product / nontech-initiative class — IGNITE, Basketball
+  // Literacy, etc). Renders a minimal read-only surface so click-through
+  // from Orchestrator doesn't dead-end on "Could not load project."
+
+  function parseFeed(md) {
+    const result = { lastUpdated: null, purpose: null, phases: [], nextStep: {} };
+
+    const updm = md.match(/^# Last updated:\s*(\d{4}-\d{2}-\d{2})/m);
+    if (updm) result.lastUpdated = updm[1];
+
+    const purpm = md.match(/## Purpose\s*\n\s*\n?([^\n#][^\n]+)/);
+    if (purpm) result.purpose = purpm[1].trim();
+
+    const statem = md.match(/## Current state[\s\S]*?```([\s\S]*?)```/);
+    if (statem) {
+      result.phases = statem[1].trim().split('\n')
+        .filter(l => l.trim())
+        .map(l => {
+          const m = l.match(/Phase\s+(\d+)\s*[—–-]\s*([^:]+):\s*(.+)/);
+          if (!m) return null;
+          const raw = m[3].trim();
+          const status = (raw.includes('Done') || raw.includes('✓'))                                 ? 'done'
+                       : (raw.includes('▶') || /in progress/i.test(raw) || raw.includes('current')) ? 'active'
+                       : 'pending';
+          return { number: m[1], name: m[2].trim(), status };
+        })
+        .filter(Boolean);
+    }
+
+    const nsm = md.match(/## Next step\s*\n([\s\S]*?)(?=\n## |\n---)/);
+    if (nsm) {
+      let curKey = null; let curVal = [];
+      const flush = () => { if (curKey) result.nextStep[curKey] = curVal.join(' ').replace(/`/g, '').trim(); };
+      for (const line of nsm[1].split('\n')) {
+        const km = line.match(/^\*\*([^*]+)\*\*[:\s]+(.*)$/);
+        if (km) {
+          flush();
+          curKey = km[1].replace(/[?:]+$/, '').trim();
+          curVal = [km[2].replace(/`/g, '').trim()];
+        } else if (curKey && line.trim()) {
+          curVal.push(line.replace(/`/g, '').trim());
+        }
+      }
+      flush();
+    }
+
+    return result;
+  }
+
+  function renderFeedPhaseStrip(phases) {
+    if (!phases || !phases.length) return '';
+    return `<div class="proj-feed-phase-strip">` +
+      phases.map((p, i) => {
+        const cls   = p.status === 'done' ? 'ph-done' : p.status === 'active' ? 'ph-active' : 'ph-pending';
+        const conn  = i < phases.length - 1
+          ? `<div class="proj-feed-phase-conn${p.status === 'done' ? ' ph-conn-done' : ''}"></div>`
+          : '';
+        return `<div class="proj-feed-phase ${cls}" title="Phase ${escHtml(p.number)} — ${escHtml(p.name)}">
+          <div class="proj-feed-phase-dot"></div>
+          <div class="proj-feed-phase-label"><span class="proj-feed-phase-num">${escHtml(p.number)}</span> ${escHtml(p.name)}</div>
+        </div>${conn}`;
+      }).join('') +
+      `</div>`;
+  }
+
+  function renderFeedSurface(container) {
+    const f = state.feed;
+    const id = state.projectId;
+    const feedGhUrl = `https://github.com/${escHtml(CONFIG.username)}/V-Pro-Hub/blob/master/projects/${escHtml(id)}/_FEED.md`;
+
+    const updatedLine = f.lastUpdated ? `<div class="proj-h-updated">Last updated <strong>${escHtml(f.lastUpdated)}</strong></div>` : '';
+
+    const nextStepEntries = Object.entries(f.nextStep || {});
+    const nextStepHtml = nextStepEntries.length
+      ? `<div class="proj-card proj-feed-nextstep">
+          <div class="proj-card-title">Next step</div>
+          ${nextStepEntries.map(([k, v]) => `<div class="proj-feed-ns-row">
+            <span class="proj-feed-ns-key">${escHtml(k)}</span>
+            <span class="proj-feed-ns-val">${inline(v)}</span>
+          </div>`).join('')}
+        </div>`
+      : '';
+
+    container.innerHTML = `
+      <div class="proj-header">
+        <div class="proj-h-row">
+          <div>
+            <div class="proj-h-title">${escHtml(id)}</div>
+            <div class="proj-h-meta">
+              <span class="proj-badge proj-badge-feed">_FEED.md surface</span>
+            </div>
+          </div>
+          <div class="proj-h-right">${updatedLine}</div>
+        </div>
+        ${f.purpose ? `<div class="proj-feed-purpose">${escHtml(f.purpose)}</div>` : ''}
+        ${renderFeedPhaseStrip(f.phases)}
+      </div>
+      <div class="proj-grid">
+        <div class="proj-main">
+          ${nextStepHtml}
+        </div>
+        <div class="proj-side">
+          <div class="proj-card proj-docs">
+            <div class="proj-card-title">Source</div>
+            <a class="proj-doc" href="${feedGhUrl}" target="_blank" rel="noopener">
+              <span class="proj-doc-icon">📄</span>
+              <span class="proj-doc-body">
+                <div class="proj-doc-path">_FEED.md ↗</div>
+                <div class="proj-doc-meta">github.com — opens in new tab</div>
+              </span>
+            </a>
+          </div>
+        </div>
+      </div>
+      <div class="proj-mvp-note">
+        <span class="proj-mvp-tag">_FEED.md only</span>
+        This project doesn't have a structured <code>state.md</code> surface yet (project-not-product or nontech-initiative class per GR9). To enable the full Layer B canvas with todo/sub-item writeback, bootstrap a <code>state.md</code> from the Vhalli template at <code>projects/vhalli/state.md</code>. Source: <a class="proj-link" href="${feedGhUrl}" target="_blank" rel="noopener">projects/${escHtml(id)}/_FEED.md</a>.
+      </div>
+    `;
+  }
+
   // ── Public render ──────────────────────────────
 
   async function render(container, param) {
@@ -982,18 +1105,35 @@ window.ProjectView = (() => {
       state.owner = CONFIG.username;
       state.repo  = (typeof CONFIG.dashboardRepo === 'string' && CONFIG.dashboardRepo) ? CONFIG.dashboardRepo : 'V-Pro-Hub';
       state.statePath = `projects/${state.projectId}/state.md`;
+      const feedPath  = `projects/${state.projectId}/_FEED.md`;
 
-      // Read state.md with SHA when possible (for SHA-guarded writeback)
-      const result = (typeof Repos.getFileWithSha === 'function')
-        ? await Repos.getFileWithSha(state.owner, state.repo, state.statePath)
+      // Try state.md first (full Layer B surface with writeback)
+      const stateResult = (typeof Repos.getFileWithSha === 'function')
+        ? await Repos.getFileWithSha(state.owner, state.repo, state.statePath).catch(() => null)
         : null;
-      const md = result ? result.content : await Repos.getFile(state.owner, state.repo, state.statePath);
-      if (!md) { container.innerHTML = renderError({ message: `state.md not found at ${state.statePath}` }); return; }
+      const stateMd = stateResult ? stateResult.content
+        : await Repos.getFile(state.owner, state.repo, state.statePath).catch(() => null);
 
-      state.stateRaw = md;
-      state.stateSha = result ? result.sha : null;
-      state.project  = parseStateMd(md);
-      renderProject(container);
+      if (stateMd) {
+        state.stateRaw = stateMd;
+        state.stateSha = stateResult ? stateResult.sha : null;
+        state.project  = parseStateMd(stateMd);
+        renderProject(container);
+        return;
+      }
+
+      // Fallback: try _FEED.md (read-only minimal surface)
+      const feedMd = await Repos.getFile(state.owner, state.repo, feedPath).catch(() => null);
+      if (feedMd) {
+        state.feedRaw = feedMd;
+        state.feed    = parseFeed(feedMd);
+        renderFeedSurface(container);
+        return;
+      }
+
+      // Neither exists
+      container.innerHTML = renderError({ message: `Neither state.md nor _FEED.md found for projects/${state.projectId}/` });
+
     } catch (e) {
       console.error('[ProjectView] render error', e);
       state.error = e;

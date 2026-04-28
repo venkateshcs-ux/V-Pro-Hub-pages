@@ -247,17 +247,16 @@ window.OrchestratorView = (() => {
 
   // ── Project card ───────────────────────────────
 
-  function renderCard(item, feed, hasState) {
+  function renderCard(item, feed) {
     const active      = feed.phases.find(p => p.status === 'active');
     const doneCount   = feed.phases.filter(p => p.status === 'done').length;
     const total       = feed.phases.length;
     const phaseInfo   = total > 0 ? `Phase ${active ? active.number : doneCount} of ${total}` : '';
     const feedUrl     = `https://github.com/${encodeURIComponent(CONFIG.username)}/V-Pro-Hub/blob/master/${item.feedPath}`;
     const projectId   = projectIdFromFeedPath(item.feedPath);
-    // Card is clickable only if a state.md surface exists (Layer B projects).
-    // _FEED.md-only projects (project-not-product, nontech-initiative) stay
-    // non-clickable until project view supports a _FEED.md fallback render.
-    const clickable   = !!(projectId && hasState);
+    // S037ext Track A: project view now handles both state.md AND _FEED.md
+    // fallback rendering, so all cards with a parseable projectId are clickable.
+    const clickable   = !!projectId;
     const cardAttrs   = clickable ? ` data-project-id="${escHtml(projectId)}" tabindex="0" role="link" title="Open ${escHtml(projectId)} project surface"` : '';
     const cls         = clickable ? 'project-card pc-clickable' : 'project-card';
     const openLink    = clickable ? `<span class="pc-open-hint">Open →</span>` : '';
@@ -386,16 +385,16 @@ window.OrchestratorView = (() => {
         return;
       }
 
-      // Fetch all _FEED.md files + check state.md existence in parallel
+      // Fetch all _FEED.md files in parallel.
+      // S037ext Track A: project view now renders a _FEED.md fallback surface for
+      // projects without state.md, so we no longer gate clickability on state.md.
+      // hasState is no longer needed; renderCard treats any project with feedPath
+      // as clickable (project view handles the routing internally).
       const resolved = await Promise.all(
         items.map(async item => {
-          if (!item.feedPath) return { item, feed: null, hasState: false };
-          const projectId = projectIdFromFeedPath(item.feedPath);
-          const [md, stateMd] = await Promise.all([
-            Repos.getFile(CONFIG.username, 'V-Pro-Hub', item.feedPath).catch(() => null),
-            projectId ? Repos.getFile(CONFIG.username, 'V-Pro-Hub', `projects/${projectId}/state.md`).catch(() => null) : Promise.resolve(null),
-          ]);
-          return { item, feed: md ? parseFeed(md) : null, hasState: !!stateMd };
+          if (!item.feedPath) return { item, feed: null };
+          const md = await Repos.getFile(CONFIG.username, 'V-Pro-Hub', item.feedPath).catch(() => null);
+          return { item, feed: md ? parseFeed(md) : null };
         })
       );
 
@@ -411,7 +410,7 @@ window.OrchestratorView = (() => {
 
         ${active.length > 0 ? `
           <div class="orch-section-label">Active projects</div>
-          <div class="orch-cards">${active.map(r => renderCard(r.item, r.feed, r.hasState)).join('')}</div>
+          <div class="orch-cards">${active.map(r => renderCard(r.item, r.feed)).join('')}</div>
         ` : ''}
 
         ${gaps.length > 0 ? `
