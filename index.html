@@ -3412,7 +3412,33 @@
     }
     .pc-feed-link:hover { color: var(--text); text-decoration: underline; }
 
-  
+    /* Clickable project card — wires to #/project/<id> route (S037 nav fix) */
+    .project-card.pc-clickable {
+      cursor: pointer;
+      transition: transform var(--transition), box-shadow var(--transition), border-color var(--transition);
+    }
+    .project-card.pc-clickable:hover {
+      transform: translateY(-1px);
+      border-color: var(--accent-soft-bd, var(--border-light));
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+    }
+    .project-card.pc-clickable:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+    .pc-open-hint {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--text-dim);
+      margin-left: 8px;
+      opacity: 0;
+      transition: opacity var(--transition);
+    }
+    .project-card.pc-clickable:hover .pc-open-hint {
+      opacity: 1;
+      color: var(--accent);
+    }
+
     /* ───────────────────────────────────────────────────────────────────
        Backlog 2.0 — new components (S035, Claude Design Phase 2.5)
        Source: docs/design-sessions/backlog-2.0-2026-04-26-handoff-polished/
@@ -4305,7 +4331,7 @@
 <script src="app/router.js?v=S035"></script>
 <script src="app/dashboard.js?v=S035"></script>
 <script src="views/sprint.js?v=S035"></script>
-<script src="views/orchestrator.js?v=S013"></script>
+<script src="views/orchestrator.js?v=S037b"></script>
 <script src="views/portfolio.js?v=C10"></script>
 <script src="views/product.js?v=C10"></script>
 <script src="views/session.js?v=C10"></script>

@@ -253,8 +253,12 @@ window.OrchestratorView = (() => {
     const total       = feed.phases.length;
     const phaseInfo   = total > 0 ? `Phase ${active ? active.number : doneCount} of ${total}` : '';
     const feedUrl     = `https://github.com/${encodeURIComponent(CONFIG.username)}/V-Pro-Hub/blob/master/${item.feedPath}`;
+    const projectId   = projectIdFromFeedPath(item.feedPath);
+    const cardAttrs   = projectId ? ` data-project-id="${escHtml(projectId)}" tabindex="0" role="link" title="Open ${escHtml(projectId)} project surface"` : '';
+    const cls         = projectId ? 'project-card pc-clickable' : 'project-card';
+    const openLink    = projectId ? `<span class="pc-open-hint">Open →</span>` : '';
 
-    return `<div class="project-card">
+    return `<div class="${cls}"${cardAttrs}>
       <div class="pc-header">
         <div class="pc-title-row">
           <span class="pc-name">${escHtml(item.name)}</span>
@@ -272,8 +276,38 @@ window.OrchestratorView = (() => {
         ${feed.lastUpdated ? `<span class="pc-updated">Updated ${escHtml(feed.lastUpdated)}</span>` : ''}
         ${phaseInfo ? `<span class="pc-phase-info">${escHtml(phaseInfo)}</span>` : ''}
         <a class="pc-feed-link" href="${feedUrl}" target="_blank" rel="noopener noreferrer">_FEED.md ↗</a>
+        ${openLink}
       </div>
     </div>`;
+  }
+
+  // Extract project folder ID from feedPath (e.g. `projects/vhalli/_FEED.md` → `vhalli`).
+  // Returns null if path doesn't match the expected shape.
+  function projectIdFromFeedPath(feedPath) {
+    if (!feedPath) return null;
+    const m = feedPath.match(/^projects\/([^/]+)\/_FEED\.md$/);
+    return m ? m[1] : null;
+  }
+
+  // Wire click + keyboard navigation on cards that have data-project-id.
+  // Card-level click navigates to `#/project/<id>`. Inner anchors stop propagation.
+  function wireEvents(container) {
+    container.querySelectorAll('.project-card[data-project-id]').forEach(card => {
+      const id = card.dataset.projectId;
+      const navigate = () => { window.location.hash = `#/project/${id}`; };
+      card.addEventListener('click', e => {
+        // Don't hijack clicks on inner anchors (e.g. _FEED.md ↗)
+        if (e.target.closest('a')) return;
+        navigate();
+      });
+      card.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); navigate(); }
+      });
+    });
+    // Inner anchors: stopPropagation so card click doesn't fire
+    container.querySelectorAll('.project-card[data-project-id] a').forEach(a => {
+      a.addEventListener('click', e => e.stopPropagation());
+    });
   }
 
   // ── Compliance gap card ────────────────────────
@@ -377,6 +411,8 @@ window.OrchestratorView = (() => {
           <div class="orch-cards">${gaps.map(r => renderGapCard(r.item)).join('')}</div>
         ` : ''}
       `;
+
+      wireEvents(container);
 
     } catch (err) {
       container.innerHTML = `<div class="orch-header"><h1 class="orch-title">⚡ Orchestrator</h1></div>
