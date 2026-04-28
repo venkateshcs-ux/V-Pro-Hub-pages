@@ -1,33 +1,44 @@
-// views/project.js — Layer B Project Surface (S036, MVP for CD review)
+// views/project.js — Layer B Project Surface (S037 — writeback live)
 //
-// Renders projects/<id>/state.md as an interactive project surface:
+// Renders projects/<id>/state.md as an interactive working file:
 //   - Status header (project name, layer/class/domain, current phase, key facts strip)
-//   - Stepwise workflow (accordion: steps with per-step sub-items, status badges, consult gates)
+//   - Stepwise workflow (accordion: steps + sub-items + status badges + consult gates)
 //   - Ready reckoner sidebar (key facts + countdown to hard deadline)
-//   - Open todos panel (derived from incomplete sub-items)
+//   - Open todos panel (toggle/add/edit/remove → state.md round-trip)
 //   - Documents panel (links to research/decisions files)
 //
-// MVP scope (S036, autonomous overnight build):
-//   ✓ Read state.md from GitHub via Repos.getFile
-//   ✓ Parse YAML frontmatter + structured markdown body
-//   ✓ Render all components, light/dark theme parity, mobile responsive
-//   ✗ Writeback (TODO comments mark where it lands; tomorrow's CD review + Sonnet pass)
-//   ✗ Edit modals + agent dispatch handles (forward-looking, post-CD-review)
+// Writeback (S037, autonomous/S037):
+//   ✓ Op 1 — toggle todo done (`- [ ]` ↔ `- [x]`)
+//   ✓ Op 2 — cycle sub-item status (▶ progress / ✓ done / ⏸ blocked / ⏳ pending)
+//   ✓ Op 3 — add new todo (insert into `## Open todos` section)
+//   ✓ Op 4 — inline edit todo / sub-item text
+//   ✓ Op 5 — remove todo
+//   ✓ Public/readonly mode hides all edit affordances
+//   ✓ Optimistic UI w/ SHA-conflict toast (reuses #76 Backlog 2.0 pattern)
 //
-// Visual language: Backlog 2.0 Polished v3 token system (tints, semantic colors,
-// Space Grotesk + JetBrains Mono). All component classes prefixed `proj-`.
+// Round-trip strategy: line-targeted safe replace on the original raw markdown.
+// Never re-serialize parsed model back to text. Frontmatter byte-for-byte preserved.
 
 window.ProjectView = (() => {
 
-  // ── State ──────────────────────────────────────
+  // ── Module state ───────────────────────────────
 
   const state = {
     projectId: null,
-    project: null,    // parsed data
-    error: null,
+    project:   null,    // parsed data
+    error:     null,
+    stateRaw:  null,    // original state.md text (truth for line-targeted edits)
+    stateSha:  null,    // current SHA (for SHA-guarded writeback)
+    statePath: null,    // `projects/<id>/state.md`
+    repo:      null,    // resolved at render
+    owner:     null,
   };
 
   // ── Helpers ────────────────────────────────────
+
+  function isReadOnly() {
+    return document.body.getAttribute('data-mode') === 'readonly';
+  }
 
   function escHtml(s) {
     return String(s ?? '')
@@ -58,13 +69,11 @@ window.ProjectView = (() => {
       const key = m[1];
       let v = m[2].trim();
       if (v === '' || v === 'null') { out[key] = null; return; }
-      if (v === 'true') { out[key] = true; return; }
+      if (v === 'true')  { out[key] = true;  return; }
       if (v === 'false') { out[key] = false; return; }
-      // strip quotes
       if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
         v = v.slice(1, -1);
       }
-      // number
       if (/^-?\d+(\.\d+)?$/.test(v)) { out[key] = Number(v); return; }
       out[key] = v;
     });
@@ -79,7 +88,6 @@ window.ProjectView = (() => {
 
   // ── State.md body parser ───────────────────────
 
-  // Splits body into sections by `## Heading`. Returns map { 'Section name': sectionLines }.
   function splitSections(body) {
     const sections = {};
     let current = null;
@@ -88,7 +96,7 @@ window.ProjectView = (() => {
       const m = line.match(/^##\s+(.+?)\s*$/);
       if (m) {
         if (current) sections[current] = buf.join('\n');
-        current = m[1].replace(/\s*\(.*?\)\s*$/, '').trim();  // strip parenthetical suffix
+        current = m[1].replace(/\s*\(.*?\)\s*$/, '').trim();
         buf = [];
       } else {
         buf.push(line);
@@ -98,12 +106,10 @@ window.ProjectView = (() => {
     return sections;
   }
 
-  // Parse `| col1 | col2 |` markdown tables. Skips header separator row.
   function parseMdTable(text) {
     const rows = [];
     const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l.startsWith('|'));
     if (lines.length < 2) return rows;
-    // First line = headers; second = separator
     const headers = lines[0].split('|').slice(1, -1).map(c => c.trim().toLowerCase());
     for (let i = 2; i < lines.length; i++) {
       const cells = lines[i].split('|').slice(1, -1).map(c => c.trim());
@@ -115,7 +121,8 @@ window.ProjectView = (() => {
     return rows;
   }
 
-  // Parse the Steps section: `### Step N — name (duration)` then sub-items `#### N.M — title`.
+  // Parse Steps + sub-items. Adds `_rawStatus` (original status line text) to each sub-item
+  // for line-targeted writeback.
   function parseSteps(text) {
     const steps = [];
     const lines = text.split(/\r?\n/);
@@ -151,33 +158,29 @@ window.ProjectView = (() => {
       const subM = line.match(/^####\s+(\d+\.\d+)\s*[—\-]\s*(.+?)\s*$/);
       if (subM && curStep) {
         pushSub();
-        curSub = { id: subM[1], name: subM[2].trim(), attrs: {} };
+        curSub = { id: subM[1], name: subM[2].trim(), attrs: {}, _rawStatusLine: null };
         continue;
       }
-      // Step-level "Status: **In progress ▶**"
       if (curStep && !curSub) {
         const ssm = line.match(/^Status:\s*\*\*(.+?)\*\*\s*$/i);
         if (ssm) { curStep.status = ssm[1].toLowerCase().replace(/\s+[▶✓⏳⏸].*/, '').trim(); continue; }
         const sm = line.match(/^Status:\s*(.+?)\s*$/i);
         if (sm) { curStep.status = sm[1].toLowerCase().replace(/\*+/g, '').replace(/\s+[▶✓⏳⏸].*/, '').trim(); continue; }
-        // Step goals (Step 3 has Goals: in body)
         const gm = line.match(/^\s*\d+\.\s+(.+?)\s*$/);
         if (gm && /goals/i.test(curStep.notes || '')) { curStep.goals.push(gm[1].trim()); }
-        // Note any "**Goals:**" marker line
         if (/\*\*Goals:\*\*/i.test(line)) curStep.notes = (curStep.notes || '') + 'goals\n';
-        // Step-level consult
         const cm = line.match(/^\*\*Consult\s*\/?\s*sign-off:\*\*/i);
         if (cm) curStep.notes = (curStep.notes || '') + 'consult\n';
         if (/^[-*]\s*Ssuresh consult/i.test(line)) curStep.consult.push('ssuresh');
         if (/^[-*]\s*SEBI-registered IA/i.test(line)) curStep.consult.push('tbd-ia');
         if (/^[-*]\s*Real CA/i.test(line) || /^[-*]\s*CA sign-off/i.test(line)) curStep.consult.push('tbd-ca');
       }
-      // Sub-item attribute line: `- **Type:** value`
       if (curSub) {
         const am = line.match(/^-\s*\*\*([\w\s\-/]+?):\*\*\s*(.+)\s*$/);
         if (am) {
           const key = am[1].toLowerCase().trim().replace(/\s+/g, '_').replace(/[\/-]/g, '_');
           curSub.attrs[key] = am[2].trim();
+          if (key === 'status') curSub._rawStatusLine = line;
           continue;
         }
       }
@@ -186,12 +189,11 @@ window.ProjectView = (() => {
     return steps;
   }
 
-  // Parse `- [ ] task` list items.
   function parseTodos(text) {
     const todos = [];
     text.split(/\r?\n/).forEach(line => {
-      const m = line.match(/^[-*]\s*\[\s\]\s+(.+?)\s*$/);
-      if (m) todos.push(m[1].trim());
+      const m = line.match(/^[-*]\s*\[([ xX])\]\s+(.+?)\s*$/);
+      if (m) todos.push({ done: /[xX]/.test(m[1]), text: m[2].trim(), raw: line });
     });
     return todos;
   }
@@ -201,11 +203,12 @@ window.ProjectView = (() => {
     const meta = parseYaml(frontmatter);
     const sections = splitSections(body);
 
-    const keyFacts = parseMdTable(sections['Key facts'] || '');
-    const team = parseMdTable(sections['Team'] || '');
+    const keyFacts  = parseMdTable(sections['Key facts'] || '');
+    const team      = parseMdTable(sections['Team'] || '');
     const documents = parseMdTable(sections['Documents'] || sections['Documents (attachments)'] || '');
-    const todos = parseTodos(sections['Open todos'] || sections['Open todos (derived view — items not yet `done` in current/next-active phase)'] || '');
-    const steps = parseSteps(sections['Steps'] || '');
+    const todosKey  = Object.keys(sections).find(k => /^Open todos/i.test(k)) || 'Open todos';
+    const todos     = parseTodos(sections[todosKey] || '');
+    const steps     = parseSteps(sections['Steps'] || '');
 
     return { meta, keyFacts, team, documents, todos, steps };
   }
@@ -229,6 +232,11 @@ window.ProjectView = (() => {
     return ({ done: 'Done', progress: 'In progress', blocked: 'Blocked', pending: 'Pending' })[kind] || 'Pending';
   }
 
+  // Cycle: pending → progress → done → blocked → pending
+  function cycleStatus(kind) {
+    return ({ pending: 'progress', progress: 'done', done: 'blocked', blocked: 'pending' })[kind] || 'progress';
+  }
+
   // ── Date helpers ───────────────────────────────
 
   function todayIso() {
@@ -242,6 +250,208 @@ window.ProjectView = (() => {
     const db = new Date(b + 'T00:00:00');
     if (isNaN(da) || isNaN(db)) return null;
     return Math.round((db - da) / (1000 * 60 * 60 * 24));
+  }
+
+  // ── Toast + save indicator (sibling of #76 backlog) ─
+
+  function ensureToastWrap() {
+    let wrap = document.getElementById('bl-toast-wrap');
+    if (!wrap) {
+      wrap = document.createElement('div');
+      wrap.id = 'bl-toast-wrap';
+      wrap.className = 'bl-toast-wrap';
+      document.body.appendChild(wrap);
+    }
+    return wrap;
+  }
+
+  function pushToast({ kind = 'success', icon, msg, action, onAction, ttl = 2500 }) {
+    const wrap = ensureToastWrap();
+    const el = document.createElement('div');
+    el.className = `bl-toast ${kind}`;
+    const defaultIcon = kind === 'success' ? '✓' : kind === 'warning' ? '⚠' : '✕';
+    el.innerHTML = `<span class="bl-toast-icon">${escHtml(icon || defaultIcon)}</span>` +
+      `<span class="bl-toast-msg"></span>` +
+      (action ? `<span class="bl-toast-action">${escHtml(action)}</span>` : '');
+    el.querySelector('.bl-toast-msg').textContent = msg;
+    if (action && onAction) {
+      el.querySelector('.bl-toast-action').addEventListener('click', () => { onAction(); el.remove(); });
+    }
+    wrap.appendChild(el);
+    setTimeout(() => {
+      el.style.opacity = '0';
+      el.style.transform = 'translateY(8px)';
+      setTimeout(() => el.remove(), 200);
+    }, ttl);
+  }
+
+  let _savesInFlight = 0;
+  function saveStart() {
+    _savesInFlight++;
+    document.body.setAttribute('data-saves-in-flight', '');
+  }
+  function saveEnd() {
+    _savesInFlight = Math.max(0, _savesInFlight - 1);
+    if (_savesInFlight === 0) document.body.removeAttribute('data-saves-in-flight');
+  }
+
+  // ── Markdown line-targeted mutations ──────────
+
+  // Status label string used in state.md `**Status:**` lines, indexed by kind.
+  // Falls back to original (pending) if existing text is richer (e.g. "in-progress (negotiation pending)").
+  function statusValueFor(kind, oldValue) {
+    const base = ({
+      pending:  'pending',
+      progress: 'in-progress',
+      done:     'done',
+      blocked:  'blocked',
+    })[kind] || 'pending';
+    // Preserve trailing parenthetical, e.g. `in-progress (negotiation pending)` keeps "(negotiation pending)"
+    const paren = oldValue ? oldValue.match(/\s*(\([^)]*\))\s*$/) : null;
+    return paren ? `${base} ${paren[1]}` : base;
+  }
+
+  // Find the line index of `## Open todos` (or variant) in the raw text.
+  function findOpenTodosHeading(rawLines) {
+    for (let i = 0; i < rawLines.length; i++) {
+      if (/^##\s+Open todos\b/i.test(rawLines[i])) return i;
+    }
+    return -1;
+  }
+
+  // Find the line index of a `#### N.M — name` heading (sub-item).
+  function findSubItemHeading(rawLines, subId) {
+    const re = new RegExp(`^####\\s+${subId.replace('.', '\\.')}\\s*[—\\-]`);
+    for (let i = 0; i < rawLines.length; i++) {
+      if (re.test(rawLines[i])) return i;
+    }
+    return -1;
+  }
+
+  // Within a sub-item block (after its #### heading), find the `- **Status:** value` line.
+  function findSubItemStatusLine(rawLines, subStartIdx) {
+    for (let i = subStartIdx + 1; i < rawLines.length; i++) {
+      const line = rawLines[i];
+      // Stop at next sub-item, step, or H2
+      if (/^####\s/.test(line) || /^###\s/.test(line) || /^##\s/.test(line)) return -1;
+      if (/^-\s*\*\*Status:\*\*/i.test(line)) return i;
+    }
+    return -1;
+  }
+
+  // Mutate raw text by op spec. Returns new text. Throws if target line not found.
+  function mutateStateMd(rawText, op) {
+    const lines = rawText.split(/\r?\n/);
+    const eol = /\r\n/.test(rawText) ? '\r\n' : '\n';
+
+    if (op.kind === 'toggle-todo') {
+      // Locate `- [ ] <text>` or `- [x] <text>` line by exact text match
+      const target = op.text;
+      for (let i = 0; i < lines.length; i++) {
+        const m = lines[i].match(/^([-*]\s*)\[([ xX])\](\s+)(.+?)(\s*)$/);
+        if (m && m[4].trim() === target.trim()) {
+          const newCheck = op.done ? 'x' : ' ';
+          lines[i] = `${m[1]}[${newCheck}]${m[3]}${m[4]}${m[5]}`;
+          return lines.join(eol);
+        }
+      }
+      throw new Error(`Could not find todo line: "${target}"`);
+    }
+
+    if (op.kind === 'cycle-substatus') {
+      const subStart = findSubItemHeading(lines, op.subId);
+      if (subStart < 0) throw new Error(`Could not find sub-item heading ${op.subId}`);
+      const statusIdx = findSubItemStatusLine(lines, subStart);
+      if (statusIdx < 0) throw new Error(`Could not find Status line under ${op.subId}`);
+      const oldLine = lines[statusIdx];
+      const m = oldLine.match(/^(-\s*\*\*Status:\*\*\s*)(.+)$/i);
+      if (!m) throw new Error(`Status line malformed at line ${statusIdx + 1}`);
+      const newValue = statusValueFor(op.newKind, m[2]);
+      lines[statusIdx] = `${m[1]}${newValue}`;
+      return lines.join(eol);
+    }
+
+    if (op.kind === 'add-todo') {
+      const headingIdx = findOpenTodosHeading(lines);
+      if (headingIdx < 0) throw new Error(`Could not find ## Open todos heading`);
+      // Find last `- [ ]`/`- [x]` line under this heading; insert after it.
+      // If none, insert two lines after heading (heading + blank line).
+      let lastTodo = -1;
+      for (let i = headingIdx + 1; i < lines.length; i++) {
+        if (/^##\s/.test(lines[i])) break;     // next H2 ends section
+        if (/^---\s*$/.test(lines[i])) break;  // separator ends section
+        if (/^[-*]\s*\[[ xX]\]\s+/.test(lines[i])) lastTodo = i;
+      }
+      const newLine = `- [ ] ${op.text}`;
+      if (lastTodo >= 0) {
+        lines.splice(lastTodo + 1, 0, newLine);
+      } else {
+        // Insert 2 lines after heading (skip the blank under the heading if present)
+        let insertAt = headingIdx + 1;
+        while (insertAt < lines.length && lines[insertAt].trim() === '') insertAt++;
+        lines.splice(insertAt, 0, newLine);
+      }
+      return lines.join(eol);
+    }
+
+    if (op.kind === 'edit-todo') {
+      const target = op.oldText;
+      for (let i = 0; i < lines.length; i++) {
+        const m = lines[i].match(/^([-*]\s*\[[ xX]\]\s+)(.+?)(\s*)$/);
+        if (m && m[2].trim() === target.trim()) {
+          lines[i] = `${m[1]}${op.newText}${m[3]}`;
+          return lines.join(eol);
+        }
+      }
+      throw new Error(`Could not find todo to edit: "${target}"`);
+    }
+
+    if (op.kind === 'remove-todo') {
+      const target = op.text;
+      for (let i = 0; i < lines.length; i++) {
+        const m = lines[i].match(/^[-*]\s*\[[ xX]\]\s+(.+?)\s*$/);
+        if (m && m[1].trim() === target.trim()) {
+          lines.splice(i, 1);
+          return lines.join(eol);
+        }
+      }
+      throw new Error(`Could not find todo to remove: "${target}"`);
+    }
+
+    throw new Error(`Unknown mutation op: ${op.kind}`);
+  }
+
+  // ── Writeback ──────────────────────────────────
+
+  async function writeStateMd(reason, op) {
+    // Re-fetch latest state.md to get fresh SHA + content (handles concurrent edits)
+    const latest = await Repos.getFileWithSha(state.owner, state.repo, state.statePath);
+    if (!latest) throw new Error('Could not fetch state.md SHA');
+    state.stateRaw = latest.content;
+    state.stateSha = latest.sha;
+    const newText = mutateStateMd(latest.content, op);
+    if (newText === latest.content) {
+      // No-op (e.g. user toggled then untoggled fast). Skip PUT.
+      return null;
+    }
+    const result = await Repos.putFile(
+      state.owner, state.repo, state.statePath,
+      newText, latest.sha,
+      `Project view writeback (${reason}) — autonomous via UI`
+    );
+    state.stateRaw = newText;
+    state.stateSha = result.sha;
+    return result;
+  }
+
+  // Reload + rerender from server (on conflict or successful write that needs full refresh)
+  async function reload(container) {
+    const latest = await Repos.getFileWithSha(state.owner, state.repo, state.statePath);
+    if (!latest) { container.innerHTML = renderError({ message: `state.md not found at ${state.statePath}` }); return; }
+    state.stateRaw = latest.content;
+    state.stateSha = latest.sha;
+    state.project = parseStateMd(latest.content);
+    renderProject(container);
   }
 
   // ── Render: skeleton + error ───────────────────
@@ -293,11 +503,12 @@ window.ProjectView = (() => {
       ? `<div class="proj-h-phase"><span class="proj-h-phase-label">Current phase</span><strong>Step ${currentStep.id} — ${escHtml(currentStep.name)}</strong>${currentStep.duration ? ` <span class="proj-h-phase-dur">(${escHtml(currentStep.duration)})</span>` : ''}</div>`
       : '';
     const updatedLine = m.last_updated ? `<div class="proj-h-updated">Last updated <strong>${escHtml(m.last_updated)}</strong>${m.last_updated_by ? ` · ${escHtml(m.last_updated_by)}` : ''}</div>` : '';
+    const saveDot = `<span class="proj-save-indicator" aria-hidden="true" title="Saving..."></span>`;
 
     return `<div class="proj-header">
       <div class="proj-h-row">
         <div>
-          <div class="proj-h-title">${escHtml(m.name || state.projectId || '')}</div>
+          <div class="proj-h-title">${escHtml(m.name || state.projectId || '')}${saveDot}</div>
           <div class="proj-h-meta">${layerBadge}${classBadge}${statusBadge}</div>
         </div>
         <div class="proj-h-right">${updatedLine}</div>
@@ -310,7 +521,6 @@ window.ProjectView = (() => {
   function renderKeyFactsStrip() {
     const facts = state.project.keyFacts || [];
     if (!facts.length) return '';
-    // Show top 5 in the strip
     const top = facts.slice(0, 5);
     const items = top.map(f => `<div class="proj-fact"><div class="proj-fact-label">${escHtml(f.label)}</div><div class="proj-fact-value">${inline(f.value)}</div></div>`).join('');
     return `<div class="proj-facts-strip">${items}</div>`;
@@ -338,9 +548,7 @@ window.ProjectView = (() => {
       : '';
     const subCount = (step.sub_items || []).length;
     const doneCount = (step.sub_items || []).filter(s => statusKind(s.attrs && s.attrs.status) === 'done').length;
-    const progressBar = subCount > 0
-      ? `<span class="proj-step-progress">${doneCount}/${subCount}</span>`
-      : '';
+    const progressBar = subCount > 0 ? `<span class="proj-step-progress">${doneCount}/${subCount}</span>` : '';
     return `<details class="proj-step ${kind}${isCurrent ? ' is-current' : ''}" ${isCurrent || kind === 'progress' ? 'open' : ''}>
       <summary class="proj-step-summary">
         <span class="proj-step-num">Step ${step.id}</span>
@@ -367,7 +575,6 @@ window.ProjectView = (() => {
     const deadline = a.deadline ? `<span class="proj-sub-deadline">⏰ ${escHtml(a.deadline)}</span>` : '';
     const action = a.pending_action ? `<div class="proj-sub-action"><strong>Pending:</strong> ${inline(a.pending_action)}</div>` : '';
 
-    // Type-specific rendering hint
     const typeKind = (a.type || '').toLowerCase();
     let typeIcon = '◎';
     if (typeKind.includes('checklist')) typeIcon = '☐';
@@ -376,19 +583,25 @@ window.ProjectView = (() => {
     else if (typeKind.includes('research')) typeIcon = '🔍';
     else if (typeKind.includes('monitoring')) typeIcon = '👁';
 
-    // Extra attrs displayed if present
     const extras = [];
-    if (a.society_demand)   extras.push(`<div class="proj-sub-extra"><strong>Society demand:</strong> ${inline(a.society_demand)}</div>`);
+    if (a.society_demand)      extras.push(`<div class="proj-sub-extra"><strong>Society demand:</strong> ${inline(a.society_demand)}</div>`);
     if (a.recommended_counter) extras.push(`<div class="proj-sub-extra"><strong>Recommended counter:</strong> ${inline(a.recommended_counter)}</div>`);
     if (a.value && a.value !== '_(to be captured)_') extras.push(`<div class="proj-sub-extra"><strong>Value:</strong> ${inline(a.value)}</div>`);
     if (a.notes) extras.push(`<div class="proj-sub-extra"><strong>Notes:</strong> ${inline(a.notes)}</div>`);
+
+    // Op 2 — sub-item status cycle button (interactive when not readonly)
+    const statusBtn = isReadOnly()
+      ? `<span class="proj-sub-status ${kind}" title="${statusLabel(kind)}">${statusGlyph(kind)}</span>`
+      : `<button class="proj-sub-status proj-clickable ${kind}"
+              data-sub-status-cycle data-sub-id="${escHtml(sub.id)}"
+              title="Click to cycle status (currently: ${statusLabel(kind)})">${statusGlyph(kind)}</button>`;
 
     return `<div class="proj-sub ${kind}" data-step="${step.id}" data-id="${escHtml(sub.id)}">
       <div class="proj-sub-row">
         <span class="proj-sub-icon">${typeIcon}</span>
         <span class="proj-sub-id">${escHtml(sub.id)}</span>
         <span class="proj-sub-name">${escHtml(sub.name)}</span>
-        <span class="proj-sub-status ${kind}" title="${statusLabel(kind)}">${statusGlyph(kind)}</span>
+        ${statusBtn}
       </div>
       <div class="proj-sub-meta">
         ${typeBadge}
@@ -433,8 +646,6 @@ window.ProjectView = (() => {
 
   function renderTodos() {
     const todos = state.project.todos || [];
-    if (!todos.length) return '';
-    // Pull todos from sub_items too: any sub_item with pending_action and not done
     const derived = [];
     (state.project.steps || []).forEach(step => {
       (step.sub_items || []).forEach(sub => {
@@ -445,6 +656,8 @@ window.ProjectView = (() => {
         }
       });
     });
+
+    const ro = isReadOnly();
 
     const derivedHtml = derived.length
       ? `<div class="proj-todos-section">
@@ -459,17 +672,29 @@ window.ProjectView = (() => {
     const stateTodosHtml = todos.length
       ? `<div class="proj-todos-section">
           <div class="proj-todos-section-label">From state.md</div>
-          ${todos.map(t => `<div class="proj-todo">
-            <span class="proj-todo-marker">☐</span>
-            <span class="proj-todo-text">${inline(t)}</span>
-          </div>`).join('')}
+          ${todos.map(t => {
+            const checked = t.done;
+            const checkbox = ro
+              ? `<span class="proj-todo-marker ${checked ? 'is-done' : ''}">${checked ? '☑' : '☐'}</span>`
+              : `<button class="proj-todo-checkbox ${checked ? 'is-done' : ''}" data-todo-toggle data-text="${escHtml(t.text)}" aria-label="${checked ? 'Mark not done' : 'Mark done'}">${checked ? '☑' : '☐'}</button>`;
+            const textHtml = ro
+              ? `<span class="proj-todo-text${checked ? ' is-done' : ''}">${inline(t.text)}</span>`
+              : `<span class="proj-todo-text${checked ? ' is-done' : ''}" data-todo-text="${escHtml(t.text)}" tabindex="0" title="Double-click to edit">${inline(t.text)}</span>`;
+            const removeBtn = ro ? '' : `<button class="proj-todo-remove" data-todo-remove data-text="${escHtml(t.text)}" aria-label="Remove" title="Remove">×</button>`;
+            return `<div class="proj-todo${checked ? ' is-done' : ''}">${checkbox}${textHtml}${removeBtn}</div>`;
+          }).join('')}
         </div>`
       : '';
+
+    const addHtml = ro ? '' : `<div class="proj-todos-add-row">
+        <button class="proj-todos-add" data-todo-add aria-label="Add todo">+ Add todo</button>
+      </div>`;
 
     return `<div class="proj-card proj-todos">
       <div class="proj-card-title">Open todos <span class="proj-card-count">${todos.length + derived.length}</span></div>
       ${derivedHtml}
       ${stateTodosHtml}
+      ${addHtml}
     </div>`;
   }
 
@@ -514,6 +739,11 @@ window.ProjectView = (() => {
   // ── Main render ────────────────────────────────
 
   function renderProject(container) {
+    const ro = isReadOnly();
+    const note = ro
+      ? `<div class="proj-mvp-note"><span class="proj-mvp-tag">Read-only</span> Public mode — sign in for edits. Source: <a class="proj-link" href="https://github.com/${escHtml(CONFIG.username)}/V-Pro-Hub/blob/master/projects/${escHtml(state.projectId)}/state.md" target="_blank" rel="noopener">projects/${escHtml(state.projectId)}/state.md</a></div>`
+      : `<div class="proj-mvp-note proj-mvp-live"><span class="proj-mvp-tag proj-mvp-tag-live">Live</span> Edits round-trip to <a class="proj-link" href="https://github.com/${escHtml(CONFIG.username)}/V-Pro-Hub/blob/master/projects/${escHtml(state.projectId)}/state.md" target="_blank" rel="noopener">projects/${escHtml(state.projectId)}/state.md</a> via GitHub Contents API.</div>`;
+
     container.innerHTML = `
       ${renderStatusHeader()}
       <div class="proj-grid">
@@ -527,16 +757,15 @@ window.ProjectView = (() => {
           ${renderAttachments()}
         </div>
       </div>
-      <div class="proj-mvp-note">
-        <span class="proj-mvp-tag">MVP</span>
-        Read-only render. Writeback (checklist tick → state.md commit), agent dispatch handles, edit modals coming via CD-review iteration. Source: <a class="proj-link" href="https://github.com/${escHtml(CONFIG.username)}/V-Pro-Hub/blob/master/projects/${escHtml(state.projectId)}/state.md" target="_blank" rel="noopener">projects/${escHtml(state.projectId)}/state.md</a>
-      </div>
+      ${note}
     `;
     wireEvents(container);
   }
 
+  // ── Event wiring ───────────────────────────────
+
   function wireEvents(container) {
-    // Doc links: hijack to navigate to GitHub blob view (MVP fallback — proper inline doc viewer post-CD)
+    // Doc links: open the file on github.com (MVP fallback for inline doc viewer)
     container.querySelectorAll('[data-doc]').forEach(el => {
       el.addEventListener('click', e => {
         e.preventDefault();
@@ -545,6 +774,198 @@ window.ProjectView = (() => {
         window.open(url, '_blank', 'noopener');
       });
     });
+
+    if (isReadOnly()) return;
+
+    // Op 1 — toggle todo done
+    container.querySelectorAll('[data-todo-toggle]').forEach(btn => {
+      btn.addEventListener('click', () => onToggleTodo(container, btn.dataset.text));
+    });
+
+    // Op 2 — cycle sub-item status
+    container.querySelectorAll('[data-sub-status-cycle]').forEach(btn => {
+      btn.addEventListener('click', () => onCycleSubStatus(container, btn.dataset.subId));
+    });
+
+    // Op 3 — add new todo
+    container.querySelectorAll('[data-todo-add]').forEach(btn => {
+      btn.addEventListener('click', () => onAddTodo(container, btn));
+    });
+
+    // Op 4 — inline edit text (double-click or Enter on focused span)
+    container.querySelectorAll('[data-todo-text]').forEach(span => {
+      span.addEventListener('dblclick', () => onEditTodoStart(container, span));
+      span.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); onEditTodoStart(container, span); }
+      });
+    });
+
+    // Op 5 — remove todo
+    container.querySelectorAll('[data-todo-remove]').forEach(btn => {
+      btn.addEventListener('click', () => onRemoveTodo(container, btn.dataset.text));
+    });
+  }
+
+  // ── Op handlers ────────────────────────────────
+
+  async function onToggleTodo(container, text) {
+    const todo = (state.project.todos || []).find(t => t.text === text);
+    if (!todo) return;
+    const newDone = !todo.done;
+
+    // Optimistic UI
+    todo.done = newDone;
+    renderProject(container);
+    saveStart();
+    try {
+      await writeStateMd(`toggle-todo ${newDone ? 'done' : 'undone'}`, { kind: 'toggle-todo', text, done: newDone });
+      pushToast({ kind: 'success', msg: newDone ? `Marked done: ${truncate(text, 40)}` : `Reopened: ${truncate(text, 40)}`, ttl: 1500 });
+    } catch (e) {
+      todo.done = !newDone;  // rollback
+      renderProject(container);
+      handleWriteError(container, e);
+    } finally { saveEnd(); }
+  }
+
+  async function onCycleSubStatus(container, subId) {
+    let sub = null;
+    let step = null;
+    for (const s of state.project.steps || []) {
+      const found = (s.sub_items || []).find(x => x.id === subId);
+      if (found) { sub = found; step = s; break; }
+    }
+    if (!sub) return;
+
+    const oldKind = statusKind(sub.attrs && sub.attrs.status);
+    const newKind = cycleStatus(oldKind);
+    const oldStatusValue = sub.attrs && sub.attrs.status;
+
+    // Optimistic UI
+    sub.attrs = sub.attrs || {};
+    sub.attrs.status = statusValueFor(newKind, oldStatusValue);
+    renderProject(container);
+    saveStart();
+    try {
+      await writeStateMd(`cycle-substatus ${subId} → ${newKind}`, { kind: 'cycle-substatus', subId, newKind });
+      pushToast({ kind: 'success', msg: `${subId} → ${statusLabel(newKind)}`, ttl: 1500 });
+    } catch (e) {
+      sub.attrs.status = oldStatusValue;  // rollback
+      renderProject(container);
+      handleWriteError(container, e);
+    } finally { saveEnd(); }
+  }
+
+  async function onAddTodo(container, btn) {
+    // Replace button with inline input
+    const row = btn.parentElement;
+    row.innerHTML = `<input class="proj-todos-add-input" placeholder="What's next?" />
+      <button class="proj-todos-add-save">Add</button>
+      <button class="proj-todos-add-cancel">Cancel</button>`;
+    const input = row.querySelector('.proj-todos-add-input');
+    const save  = row.querySelector('.proj-todos-add-save');
+    const cancel = row.querySelector('.proj-todos-add-cancel');
+    input.focus();
+
+    const submit = async () => {
+      const text = input.value.trim();
+      if (!text) { renderProject(container); return; }
+
+      // Optimistic UI
+      state.project.todos = state.project.todos || [];
+      state.project.todos.push({ done: false, text, raw: `- [ ] ${text}` });
+      renderProject(container);
+      saveStart();
+      try {
+        await writeStateMd(`add-todo`, { kind: 'add-todo', text });
+        pushToast({ kind: 'success', msg: `Added: ${truncate(text, 40)}`, ttl: 1500 });
+      } catch (e) {
+        state.project.todos.pop();
+        renderProject(container);
+        handleWriteError(container, e);
+      } finally { saveEnd(); }
+    };
+
+    save.addEventListener('click', submit);
+    cancel.addEventListener('click', () => renderProject(container));
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter')  { e.preventDefault(); submit(); }
+      if (e.key === 'Escape') { e.preventDefault(); renderProject(container); }
+    });
+  }
+
+  function onEditTodoStart(container, span) {
+    const oldText = span.dataset.todoText;
+    const wrap = document.createElement('span');
+    wrap.className = 'proj-todo-edit';
+    wrap.innerHTML = `<input class="proj-todo-edit-input" value="${escHtml(oldText)}" />
+      <button class="proj-todo-edit-save">Save</button>
+      <button class="proj-todo-edit-cancel">×</button>`;
+    span.replaceWith(wrap);
+    const input = wrap.querySelector('.proj-todo-edit-input');
+    input.focus(); input.select();
+
+    const submit = async () => {
+      const newText = input.value.trim();
+      if (!newText || newText === oldText) { renderProject(container); return; }
+
+      const todo = (state.project.todos || []).find(t => t.text === oldText);
+      if (!todo) { renderProject(container); return; }
+      // Optimistic UI
+      todo.text = newText;
+      renderProject(container);
+      saveStart();
+      try {
+        await writeStateMd(`edit-todo`, { kind: 'edit-todo', oldText, newText });
+        pushToast({ kind: 'success', msg: `Updated: ${truncate(newText, 40)}`, ttl: 1500 });
+      } catch (e) {
+        todo.text = oldText;
+        renderProject(container);
+        handleWriteError(container, e);
+      } finally { saveEnd(); }
+    };
+    wrap.querySelector('.proj-todo-edit-save').addEventListener('click', submit);
+    wrap.querySelector('.proj-todo-edit-cancel').addEventListener('click', () => renderProject(container));
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter')  { e.preventDefault(); submit(); }
+      if (e.key === 'Escape') { e.preventDefault(); renderProject(container); }
+    });
+  }
+
+  async function onRemoveTodo(container, text) {
+    if (!confirm(`Remove this todo?\n\n"${text}"`)) return;
+
+    // Optimistic UI
+    const todos = state.project.todos || [];
+    const idx = todos.findIndex(t => t.text === text);
+    if (idx < 0) return;
+    const removed = todos.splice(idx, 1)[0];
+    renderProject(container);
+    saveStart();
+    try {
+      await writeStateMd(`remove-todo`, { kind: 'remove-todo', text });
+      pushToast({ kind: 'success', msg: `Removed: ${truncate(text, 40)}`, ttl: 1500 });
+    } catch (e) {
+      todos.splice(idx, 0, removed);
+      renderProject(container);
+      handleWriteError(container, e);
+    } finally { saveEnd(); }
+  }
+
+  function handleWriteError(container, e) {
+    if (e && e.code === 'sha_conflict') {
+      pushToast({ kind: 'danger', icon: '⚠',
+        msg: 'Someone else edited this — reload to see latest',
+        action: 'Reload', onAction: () => reload(container), ttl: 6000 });
+    } else if (e && /401|invalid|expired/i.test(e.message || '')) {
+      pushToast({ kind: 'danger', icon: '⚠', msg: 'Auth failed — check PAT in config.js', ttl: 5000 });
+    } else {
+      pushToast({ kind: 'danger', icon: '⚠', msg: `Save failed: ${e && e.message ? e.message : 'unknown error'}`, ttl: 4000 });
+    }
+  }
+
+  function truncate(s, n) {
+    s = String(s || '');
+    return s.length > n ? s.slice(0, n - 1) + '…' : s;
   }
 
   // ── Public render ──────────────────────────────
@@ -552,19 +973,26 @@ window.ProjectView = (() => {
   async function render(container, param) {
     state.projectId = param || null;
     if (!state.projectId) {
-      // Default: redirect to vhalli (only Layer B project today)
       container.innerHTML = renderEmpty();
       return;
     }
 
     container.innerHTML = renderSkeleton();
     try {
-      const owner = CONFIG.username;
-      const repo  = (typeof CONFIG.dashboardRepo === 'string' && CONFIG.dashboardRepo) ? CONFIG.dashboardRepo : 'V-Pro-Hub';
-      const path  = `projects/${state.projectId}/state.md`;
-      const md = await Repos.getFile(owner, repo, path);
-      if (!md) { container.innerHTML = renderError({ message: `state.md not found at ${path}` }); return; }
-      state.project = parseStateMd(md);
+      state.owner = CONFIG.username;
+      state.repo  = (typeof CONFIG.dashboardRepo === 'string' && CONFIG.dashboardRepo) ? CONFIG.dashboardRepo : 'V-Pro-Hub';
+      state.statePath = `projects/${state.projectId}/state.md`;
+
+      // Read state.md with SHA when possible (for SHA-guarded writeback)
+      const result = (typeof Repos.getFileWithSha === 'function')
+        ? await Repos.getFileWithSha(state.owner, state.repo, state.statePath)
+        : null;
+      const md = result ? result.content : await Repos.getFile(state.owner, state.repo, state.statePath);
+      if (!md) { container.innerHTML = renderError({ message: `state.md not found at ${state.statePath}` }); return; }
+
+      state.stateRaw = md;
+      state.stateSha = result ? result.sha : null;
+      state.project  = parseStateMd(md);
       renderProject(container);
     } catch (e) {
       console.error('[ProjectView] render error', e);

@@ -3976,6 +3976,160 @@
       margin-right: 8px;
       vertical-align: 1px;
     }
+    .proj-mvp-live {
+      background: var(--success-soft-bg, var(--surface));
+      border-color: var(--success-soft-bd, var(--border));
+      color: var(--text);
+    }
+    .proj-mvp-tag-live {
+      background: var(--success-soft-fg, var(--success, #059669));
+      color: #fff;
+    }
+
+    /* Save indicator dot (sibling of #76 .bl-save-indicator) */
+    .proj-save-indicator {
+      display: none;
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--accent, var(--success-soft-fg));
+      margin-left: 8px;
+      vertical-align: middle;
+    }
+    body[data-saves-in-flight] .proj-save-indicator {
+      display: inline-block;
+      animation: pulse 0.8s ease-in-out infinite;
+    }
+
+    /* Op 1 — todo checkbox (interactive) */
+    .proj-todo-checkbox {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text);
+      font-size: 16px;
+      line-height: 1;
+      padding: 2px 4px;
+      cursor: pointer;
+      border-radius: 4px;
+      flex-shrink: 0;
+      transition: all var(--transition, 0.15s);
+    }
+    .proj-todo-checkbox:hover {
+      background: var(--surface-raised, var(--surface));
+      border-color: var(--border-light, var(--border));
+    }
+    .proj-todo-checkbox.is-done { color: var(--success-soft-fg, var(--success, #059669)); }
+
+    /* Op 4 — todo text (editable affordance) */
+    .proj-todo-text { padding: 2px 4px; border-radius: 4px; transition: background var(--transition, 0.15s); }
+    [data-todo-text] { cursor: text; outline: none; }
+    [data-todo-text]:hover { background: var(--surface-raised, var(--surface)); }
+    [data-todo-text]:focus { background: var(--surface-raised, var(--surface)); box-shadow: 0 0 0 2px var(--accent-soft-bg, transparent); }
+    .proj-todo-text.is-done { color: var(--text-dim); text-decoration: line-through; }
+
+    /* Op 5 — remove button (hover-reveal) */
+    .proj-todo { display: flex; align-items: flex-start; gap: 6px; padding: 4px 0; position: relative; }
+    .proj-todo-remove {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-dim);
+      font-size: 14px;
+      line-height: 1;
+      padding: 2px 6px;
+      cursor: pointer;
+      border-radius: 4px;
+      margin-left: auto;
+      flex-shrink: 0;
+      opacity: 0;
+      transition: all var(--transition, 0.15s);
+    }
+    .proj-todo:hover .proj-todo-remove { opacity: 0.7; }
+    .proj-todo-remove:hover { opacity: 1 !important; background: var(--danger-soft-bg, var(--surface)); border-color: var(--danger-soft-bd, var(--border)); color: var(--danger-soft-fg, var(--danger, #dc2626)); }
+
+    /* Op 3 — add todo affordance */
+    .proj-todos-add-row {
+      display: flex;
+      gap: 6px;
+      padding: 8px 0 4px;
+      align-items: center;
+    }
+    .proj-todos-add {
+      background: transparent;
+      border: 1px dashed var(--border-light, var(--border));
+      color: var(--text-dim);
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+      width: 100%;
+      text-align: left;
+      transition: all var(--transition, 0.15s);
+    }
+    .proj-todos-add:hover {
+      background: var(--surface-raised, var(--surface));
+      border-color: var(--accent-soft-bd, var(--border));
+      color: var(--text);
+    }
+    .proj-todos-add-input {
+      flex: 1;
+      background: var(--surface);
+      border: 1px solid var(--accent-soft-bd, var(--border));
+      color: var(--text);
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-family: var(--font-ui, inherit);
+      outline: none;
+    }
+    .proj-todos-add-input:focus { border-color: var(--accent, var(--border)); }
+    .proj-todos-add-save, .proj-todos-add-cancel,
+    .proj-todo-edit-save, .proj-todo-edit-cancel {
+      background: var(--surface-raised, var(--surface));
+      border: 1px solid var(--border-light, var(--border));
+      color: var(--text);
+      padding: 5px 10px;
+      border-radius: 5px;
+      font-size: 11px;
+      cursor: pointer;
+      transition: all var(--transition, 0.15s);
+    }
+    .proj-todos-add-save:hover, .proj-todo-edit-save:hover {
+      background: var(--accent-soft-bg, var(--surface));
+      border-color: var(--accent, var(--border));
+      color: var(--accent, var(--text));
+    }
+    .proj-todos-add-cancel:hover, .proj-todo-edit-cancel:hover {
+      color: var(--text-dim);
+    }
+
+    /* Op 4 — inline edit form */
+    .proj-todo-edit { display: inline-flex; gap: 6px; align-items: center; flex: 1; }
+    .proj-todo-edit-input {
+      flex: 1;
+      background: var(--surface);
+      border: 1px solid var(--accent-soft-bd, var(--border));
+      color: var(--text);
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-family: var(--font-ui, inherit);
+      outline: none;
+    }
+    .proj-todo-edit-input:focus { border-color: var(--accent, var(--border)); }
+
+    /* Op 2 — sub-item status button (interactive vs static) */
+    .proj-sub-status.proj-clickable {
+      background: transparent;
+      border: 1px solid transparent;
+      cursor: pointer;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font: inherit;
+      transition: all var(--transition, 0.15s);
+    }
+    .proj-sub-status.proj-clickable:hover {
+      background: var(--surface-raised, var(--surface));
+      border-color: var(--border-light, var(--border));
+    }
 
     /* Mobile */
     @media (max-width: 800px) {
@@ -4157,7 +4311,7 @@
 <script src="views/session.js?v=C10"></script>
 <script src="views/context.js?v=C10"></script>
 <script src="views/backlog.js?v=S036b"></script>
-<script src="views/project.js?v=S036d"></script>
+<script src="views/project.js?v=S037a"></script>
 <script src="views/health.js?v=C12"></script>
 <script src="views/architecture.js?v=S07"></script>
 <script src="views/investment.js?v=S10"></script>
