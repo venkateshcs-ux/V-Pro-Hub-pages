@@ -4007,6 +4007,67 @@
     .proj-todo-derived { background: var(--bg); border: 1px solid var(--border); }
     .proj-todo-derived.progress { border-color: var(--warning-soft-bd, var(--border)); }
 
+    /* S038 — todos grouped by sub-item */
+    .proj-todo-group {
+      margin-bottom: 14px;
+      padding: 8px 10px 6px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg);
+    }
+    .proj-todo-group:last-child { margin-bottom: 0; }
+    .proj-todo-group.progress { border-color: var(--warning-soft-bd, var(--border)); background: var(--warning-soft-bg, var(--bg)); }
+    .proj-todo-group.done     { border-color: var(--success-soft-bd, var(--border)); background: var(--success-soft-bg, var(--bg)); opacity: 0.75; }
+    .proj-todo-group.blocked  { border-color: var(--danger-soft-bd, var(--border));  background: var(--danger-soft-bg, var(--bg)); }
+    .proj-todo-group-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+      padding-bottom: 6px;
+      border-bottom: 1px dashed var(--border-light, var(--border));
+    }
+    .proj-todo-group-id {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10.5px;
+      color: var(--text-dim);
+      padding: 1px 6px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      flex: 0 0 auto;
+    }
+    .proj-todo-group-name { font-size: 12.5px; font-weight: 600; color: var(--text); flex: 1 1 auto; }
+    .proj-todo-group-status { font-size: 13px; flex: 0 0 auto; }
+    .proj-todo-group-status.done     { color: var(--success-soft-fg, var(--success, #059669)); }
+    .proj-todo-group-status.progress { color: var(--warning-soft-fg, var(--warning, #d97706)); }
+    .proj-todo-group-status.blocked  { color: var(--danger-soft-fg,  var(--danger,  #dc2626)); }
+    .proj-todo-group-status.pending  { color: var(--text-dim); }
+    .proj-todo-group-derived {
+      font-size: 12px;
+      color: var(--text-dim);
+      padding: 4px 6px 6px;
+      line-height: 1.45;
+    }
+    .proj-todo-group-derived-label {
+      font-weight: 600;
+      color: var(--text);
+      margin-right: 4px;
+    }
+    .proj-todo-group-cross,
+    .proj-todo-group-other {
+      border-style: dashed;
+      background: var(--surface);
+    }
+    .proj-todo-group-cross .proj-todo-group-name,
+    .proj-todo-group-other .proj-todo-group-name {
+      color: var(--text-dim);
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      font-size: 11px;
+    }
+
     /* Team */
     .proj-team-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 4px 12px; padding: 6px 0; border-bottom: 1px dashed var(--border-light, var(--border)); font-size: 12px; }
     .proj-team-row:last-child { border-bottom: 0; }
@@ -4457,8 +4518,8 @@
 <script src="views/product.js?v=C10"></script>
 <script src="views/session.js?v=C10"></script>
 <script src="views/context.js?v=C10"></script>
-<script src="views/backlog.js?v=S037i"></script>
-<script src="views/project.js?v=S037f"></script>
+<script src="views/backlog.js?v=S038a"></script>
+<script src="views/project.js?v=S038a"></script>
 <script src="views/health.js?v=C12"></script>
 <script src="views/architecture.js?v=S07"></script>
 <script src="views/investment.js?v=S10"></script>

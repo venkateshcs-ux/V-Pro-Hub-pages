@@ -454,7 +454,13 @@ window.BacklogView = (() => {
 
   // ── Filter logic ───────────────────────────────
 
-  function filteredItems() {
+  // S038 — opts.skipTileFilters=true returns the "tile-count base set":
+  // Product / Session / Sprint / Search applied, but priority+status tile filters
+  // skipped. Used by renderSummary so tile counts stay stable as tiles are toggled
+  // (counts represent "headroom" — what each tile expands to — not the post-tile
+  // visible scope). Items list/board still calls filteredItems() with no opts.
+  function filteredItems(opts) {
+    opts = opts || {};
     const q = state.searchQuery.trim().toLowerCase().replace(/^#/, '');
     const committedSet = state.activeSprint ?
       new Set((state.activeSprint.frontmatter.committed_items || []).map(Number)) :
@@ -473,18 +479,20 @@ window.BacklogView = (() => {
       // (these filter values render but currently don't exclude further; future #NEW)
 
       // S037ext Track E — Summary tile filters (priority + status)
-      if (state.priorityFilter) {
-        const isHigh = i.priority === 'HIGH' || i.priority === 'SUPER HIGH';
-        const isMed  = i.priority === 'Medium';
-        const isLow  = i.priority === 'Low';
-        if (state.priorityFilter === 'high' && !isHigh) return false;
-        if (state.priorityFilter === 'medium' && !isMed) return false;
-        if (state.priorityFilter === 'low' && !isLow) return false;
-      }
-      if (state.statusFilter) {
-        const isDone = /Done|✓/i.test(i.status) || i.status.toLowerCase() === 'closed';
-        if (state.statusFilter === 'open' && isDone) return false;
-        if (state.statusFilter === 'done' && !isDone) return false;
+      if (!opts.skipTileFilters) {
+        if (state.priorityFilter) {
+          const isHigh = i.priority === 'HIGH' || i.priority === 'SUPER HIGH';
+          const isMed  = i.priority === 'Medium';
+          const isLow  = i.priority === 'Low';
+          if (state.priorityFilter === 'high' && !isHigh) return false;
+          if (state.priorityFilter === 'medium' && !isMed) return false;
+          if (state.priorityFilter === 'low' && !isLow) return false;
+        }
+        if (state.statusFilter) {
+          const isDone = /Done|✓/i.test(i.status) || i.status.toLowerCase() === 'closed';
+          if (state.statusFilter === 'open' && isDone) return false;
+          if (state.statusFilter === 'done' && !isDone) return false;
+        }
       }
 
       if (q) {
@@ -578,17 +586,18 @@ window.BacklogView = (() => {
   // S037ext Track E — clickable summary tile factory.
   // Each tile carries data-tile-key + active class when its filter is selected.
   // Clicking toggles the filter (selecting → re-clicking clears).
-  function renderSummary(items) {
+  function renderSummary(baseItems) {
+    // S038 — `baseItems` is the tile-count base set (Product/Session/Sprint/Search
+    // applied, priority+status tile filters skipped). This makes counts represent
+    // headroom — what each tile would expand to — independent of which tile is
+    // currently active. Earlier (S037ext) this received the fully-filtered items,
+    // which caused counts to collapse to 0 when a tile was selected.
     const isDone = i => /Done|✓/i.test(i.status) || i.status.toLowerCase() === 'closed';
-    // Counts come from the broader filter set (excluding tile-driven filters)
-    // so users see the "headroom" each tile would expand to. We compute them
-    // off `items` (already-filtered) for now — keeps things simple; tile counts
-    // reflect the visible scope after non-tile filters apply.
-    const open = items.filter(i => !isDone(i));
+    const open = baseItems.filter(i => !isDone(i));
     const high = open.filter(i => i.priority === 'HIGH' || i.priority === 'SUPER HIGH');
     const med  = open.filter(i => i.priority === 'Medium');
     const low  = open.filter(i => i.priority === 'Low');
-    const done = items.filter(isDone);
+    const done = baseItems.filter(isDone);
 
     // Active states
     const isOpenSel = state.statusFilter === 'open';
@@ -868,6 +877,7 @@ window.BacklogView = (() => {
 
   function fullRender(container) {
     const items = filteredItems();
+    const tileBase = filteredItems({ skipTileFilters: true });
     const showSprintCtx = state.sprintFilter === 'Current' && state.activeSprint;
     // #90 — board view available across all sprint filters (S037ext); previously gated to Current+activeSprint
     const showKanban    = state.vmMode === 'board';
@@ -877,7 +887,7 @@ window.BacklogView = (() => {
       ${renderHeader()}
       ${renderSearch()}
       ${renderFilterArea()}
-      ${renderSummary(items)}
+      ${renderSummary(tileBase)}
       ${showSprintCtx ? renderSprintBand() : ''}
       <div id="bl-main-canvas">${showKanban ? renderKanban(items) : renderItemsList(items)}</div>
       ${showSprintCtx ? renderAuxPanels() : ''}
@@ -888,13 +898,14 @@ window.BacklogView = (() => {
   // Update only the main canvas (faster than full render for filter changes)
   function updateCanvas(container) {
     const items = filteredItems();
+    const tileBase = filteredItems({ skipTileFilters: true });
     const showKanban = state.vmMode === 'board';
     const canvas = container.querySelector('#bl-main-canvas');
     if (canvas) canvas.innerHTML = showKanban ? renderKanban(items) : renderItemsList(items);
     wireCanvasEvents(container);
-    // Update summary
+    // Update summary (counts from tile-base; selection state from current filters)
     const summary = container.querySelector('.bl-sb');
-    if (summary) summary.outerHTML = renderSummary(items);
+    if (summary) summary.outerHTML = renderSummary(tileBase);
   }
 
   // ── Event wiring ───────────────────────────────

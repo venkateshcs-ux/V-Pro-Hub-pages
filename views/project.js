@@ -644,45 +644,98 @@ window.ProjectView = (() => {
     </div>`;
   }
 
+  // S038 — extract sub-item / cross-step group reference from a todo's
+  // trailing parenthetical (e.g. "(1.2)", "(1.1 cross — ...)", or "(1.1) — note").
+  // Allows an optional trailing dash-note (em-dash or hyphen) after the paren so
+  // todos like "Send NOC letter (1.1) — Ssuresh consult before" still group correctly.
+  // Used by renderTodos to bucket todos under their owning sub-item heading.
+  function parseTodoMeta(text) {
+    const re = /\s*\((\d+(?:\.\d+)?)\b([^)]*)\)(\s*(?:[—\-][\s\S]*)?)\s*$/;
+    const m = text.match(re);
+    if (!m) return { subId: null, stepId: null, isCross: false, displayText: text };
+    const subId    = m[1];
+    const isCross  = /\bcross\b/i.test(m[2] || '');
+    const stepId   = subId.includes('.') ? parseInt(subId.split('.')[0], 10) : parseInt(subId, 10);
+    const dashNote = (m[3] || '').trim();
+    const displayText = text.replace(re, dashNote ? ` ${dashNote}` : '').trim();
+    return { subId, stepId, isCross, displayText };
+  }
+
+  function renderTodoLine(t, ro, opts) {
+    opts = opts || {};
+    const checked = t.done;
+    const display = opts.showSuffix ? t.text : (t.displayText || t.text);
+    const checkbox = ro
+      ? `<span class="proj-todo-marker ${checked ? 'is-done' : ''}">${checked ? '☑' : '☐'}</span>`
+      : `<button class="proj-todo-checkbox ${checked ? 'is-done' : ''}" data-todo-toggle data-text="${escHtml(t.text)}" aria-label="${checked ? 'Mark not done' : 'Mark done'}">${checked ? '☑' : '☐'}</button>`;
+    const textHtml = ro
+      ? `<span class="proj-todo-text${checked ? ' is-done' : ''}">${inline(display)}</span>`
+      : `<span class="proj-todo-text${checked ? ' is-done' : ''}" data-todo-text="${escHtml(t.text)}" tabindex="0" title="Double-click to edit">${inline(display)}</span>`;
+    const removeBtn = ro ? '' : `<button class="proj-todo-remove" data-todo-remove data-text="${escHtml(t.text)}" aria-label="Remove" title="Remove">×</button>`;
+    return `<div class="proj-todo${checked ? ' is-done' : ''}">${checkbox}${textHtml}${removeBtn}</div>`;
+  }
+
   function renderTodos() {
-    const todos = state.project.todos || [];
-    const derived = [];
-    (state.project.steps || []).forEach(step => {
+    const todosRaw = state.project.todos || [];
+    const ro = isReadOnly();
+
+    // Enrich + bucket
+    const todos = todosRaw.map(t => Object.assign({}, t, parseTodoMeta(t.text)));
+    const bySub = new Map();   // subId -> [todos]
+    const crossList = [];
+    const otherList = [];
+    todos.forEach(t => {
+      if (t.isCross) { crossList.push(t); return; }
+      if (t.subId && t.subId.includes('.')) {
+        if (!bySub.has(t.subId)) bySub.set(t.subId, []);
+        bySub.get(t.subId).push(t);
+        return;
+      }
+      otherList.push(t);
+    });
+
+    // Per-sub-item groups in document order; each shows derived pending_action
+    // (from state.md sub-item attrs) followed by direct todos.
+    const steps = state.project.steps || [];
+    const groupBlocks = [];
+    steps.forEach(step => {
       (step.sub_items || []).forEach(sub => {
-        const k = statusKind(sub.attrs && sub.attrs.status);
-        if (k === 'done') return;
-        if (sub.attrs && sub.attrs.pending_action) {
-          derived.push({ id: sub.id, name: sub.name, action: sub.attrs.pending_action, kind: k, step: step.id });
-        }
+        const direct = bySub.get(sub.id) || [];
+        const a = sub.attrs || {};
+        const subKind = statusKind(a.status);
+        const hasDerived = a.pending_action && subKind !== 'done';
+        if (!hasDerived && direct.length === 0) return;
+        const derivedHtml = hasDerived
+          ? `<div class="proj-todo-group-derived"><span class="proj-todo-group-derived-label">Pending:</span> ${inline(a.pending_action)}</div>`
+          : '';
+        const todosHtml = direct.map(t => renderTodoLine(t, ro)).join('');
+        groupBlocks.push(`<div class="proj-todo-group ${subKind}">
+          <div class="proj-todo-group-head">
+            <span class="proj-todo-group-id">${escHtml(sub.id)}</span>
+            <span class="proj-todo-group-name">${escHtml(sub.name)}</span>
+            <span class="proj-todo-group-status ${subKind}" title="${statusLabel(subKind)}">${statusGlyph(subKind)}</span>
+          </div>
+          ${derivedHtml}
+          ${todosHtml}
+        </div>`);
       });
     });
 
-    const ro = isReadOnly();
-
-    const derivedHtml = derived.length
-      ? `<div class="proj-todos-section">
-          <div class="proj-todos-section-label">Per sub-item</div>
-          ${derived.map(d => `<div class="proj-todo proj-todo-derived ${d.kind}">
-            <span class="proj-todo-id">${escHtml(d.id)}</span>
-            <span class="proj-todo-text"><strong>${escHtml(d.name)}:</strong> ${inline(d.action)}</span>
-          </div>`).join('')}
+    const crossHtml = crossList.length
+      ? `<div class="proj-todo-group proj-todo-group-cross">
+          <div class="proj-todo-group-head">
+            <span class="proj-todo-group-name">Cross-step</span>
+          </div>
+          ${crossList.map(t => renderTodoLine(t, ro, { showSuffix: true })).join('')}
         </div>`
       : '';
 
-    const stateTodosHtml = todos.length
-      ? `<div class="proj-todos-section">
-          <div class="proj-todos-section-label">From state.md</div>
-          ${todos.map(t => {
-            const checked = t.done;
-            const checkbox = ro
-              ? `<span class="proj-todo-marker ${checked ? 'is-done' : ''}">${checked ? '☑' : '☐'}</span>`
-              : `<button class="proj-todo-checkbox ${checked ? 'is-done' : ''}" data-todo-toggle data-text="${escHtml(t.text)}" aria-label="${checked ? 'Mark not done' : 'Mark done'}">${checked ? '☑' : '☐'}</button>`;
-            const textHtml = ro
-              ? `<span class="proj-todo-text${checked ? ' is-done' : ''}">${inline(t.text)}</span>`
-              : `<span class="proj-todo-text${checked ? ' is-done' : ''}" data-todo-text="${escHtml(t.text)}" tabindex="0" title="Double-click to edit">${inline(t.text)}</span>`;
-            const removeBtn = ro ? '' : `<button class="proj-todo-remove" data-todo-remove data-text="${escHtml(t.text)}" aria-label="Remove" title="Remove">×</button>`;
-            return `<div class="proj-todo${checked ? ' is-done' : ''}">${checkbox}${textHtml}${removeBtn}</div>`;
-          }).join('')}
+    const otherHtml = otherList.length
+      ? `<div class="proj-todo-group proj-todo-group-other">
+          <div class="proj-todo-group-head">
+            <span class="proj-todo-group-name">Other</span>
+          </div>
+          ${otherList.map(t => renderTodoLine(t, ro)).join('')}
         </div>`
       : '';
 
@@ -691,9 +744,10 @@ window.ProjectView = (() => {
       </div>`;
 
     return `<div class="proj-card proj-todos">
-      <div class="proj-card-title">Open todos <span class="proj-card-count">${todos.length + derived.length}</span></div>
-      ${derivedHtml}
-      ${stateTodosHtml}
+      <div class="proj-card-title">Open todos <span class="proj-card-count">${todos.length}</span></div>
+      ${groupBlocks.join('')}
+      ${crossHtml}
+      ${otherHtml}
       ${addHtml}
     </div>`;
   }
