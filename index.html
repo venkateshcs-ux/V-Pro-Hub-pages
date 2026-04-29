@@ -3931,6 +3931,17 @@
     .proj-sub-type { padding: 1px 6px; background: var(--surface); border-radius: 3px; font-family: 'JetBrains Mono', monospace; font-size: 10.5px; }
     .proj-sub-owner { font-family: 'JetBrains Mono', monospace; font-size: 11px; }
     .proj-sub-deadline { color: var(--warning, #d97706); }
+    /* S038 — postman pattern: cross-tool handoff envelope */
+    .proj-sub-via {
+      padding: 1px 6px;
+      background: var(--accent-soft-bg, var(--surface));
+      border: 1px solid var(--accent-soft-bd, var(--border));
+      color: var(--accent-soft-fg, var(--text-dim));
+      border-radius: 3px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10.5px;
+      font-weight: 500;
+    }
 
     .proj-sub-action { font-size: 12.5px; color: var(--text); padding: 6px 8px; background: var(--accent-soft-bg, var(--surface)); border-left: 2px solid var(--accent, var(--border)); border-radius: 4px; }
     .proj-sub-action strong { color: var(--accent, var(--text)); margin-right: 4px; }
@@ -4519,7 +4530,7 @@
 <script src="views/session.js?v=C10"></script>
 <script src="views/context.js?v=C10"></script>
 <script src="views/backlog.js?v=S038a"></script>
-<script src="views/project.js?v=S038a"></script>
+<script src="views/project.js?v=S038b"></script>
 <script src="views/health.js?v=C12"></script>
 <script src="views/architecture.js?v=S07"></script>
 <script src="views/investment.js?v=S10"></script>

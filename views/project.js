@@ -565,6 +565,16 @@ window.ProjectView = (() => {
     </details>`;
   }
 
+  // S038 — postman-pattern attrs (cross-tool handoff per GR16 mechanism (c)).
+  // Maps a `target_tool` slug to a human label for the "via X" badge.
+  const TOOL_LABELS = {
+    'perplexity-pro': 'Perplexity Pro',
+    'claude-design':  'Claude Design',
+    'claude-text':    'Claude (text)',
+    'claude-code':    'Claude Code',
+    'runway-standard': 'Runway',
+  };
+
   function renderSubItem(sub, step) {
     const a = sub.attrs || {};
     const kind = statusKind(a.status);
@@ -574,6 +584,14 @@ window.ProjectView = (() => {
     const research = a.research ? `<a class="proj-link proj-sub-link" href="#/project/${escHtml(state.projectId)}/doc/${escHtml(a.research)}" data-doc="${escHtml(a.research)}">📄 ${escHtml(a.research)}</a>` : '';
     const deadline = a.deadline ? `<span class="proj-sub-deadline">⏰ ${escHtml(a.deadline)}</span>` : '';
     const action = a.pending_action ? `<div class="proj-sub-action"><strong>Pending:</strong> ${inline(a.pending_action)}</div>` : '';
+
+    // S038 — postman pattern: target_tool / prompt_path / return_path.
+    // Renders the cross-tool handoff envelope so Venkatesh (postman) can see
+    // at a glance: which tool, where the prompt artifact lives, where output returns.
+    const toolLabel = a.target_tool ? (TOOL_LABELS[a.target_tool] || a.target_tool) : '';
+    const viaBadge = a.target_tool ? `<span class="proj-sub-via" title="Cross-tool handoff target — postman pattern">via ${escHtml(toolLabel)}</span>` : '';
+    const promptLink = a.prompt_path ? `<a class="proj-link proj-sub-link" href="#/project/${escHtml(state.projectId)}/doc/${escHtml(a.prompt_path)}" data-doc="${escHtml(a.prompt_path)}" title="Prompt artifact for the cross-tool handoff">📝 prompt</a>` : '';
+    const returnLink = a.return_path ? `<a class="proj-link proj-sub-link" href="#/project/${escHtml(state.projectId)}/doc/${escHtml(a.return_path)}" data-doc="${escHtml(a.return_path)}" title="Where the postman drops the output back">📥 return → ${escHtml(a.return_path)}</a>` : '';
 
     const typeKind = (a.type || '').toLowerCase();
     let typeIcon = '◎';
@@ -606,8 +624,11 @@ window.ProjectView = (() => {
       <div class="proj-sub-meta">
         ${typeBadge}
         ${ownerBadge}
+        ${viaBadge}
         ${consultBadge}
         ${research}
+        ${promptLink}
+        ${returnLink}
         ${deadline}
       </div>
       ${action}
