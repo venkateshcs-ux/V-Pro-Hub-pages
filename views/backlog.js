@@ -222,7 +222,7 @@ window.BacklogView = (() => {
       const STATUS_MAP = { 'in-progress': 'In Progress ▶', 'done': 'Done ✓', 'blocked': '⏸ Blocked', 'open': 'Open' };
       const synthesized = await Promise.all(missingSlugs.map(async slug => {
         try {
-          const md = await Repos.getFile(CONFIG.username, state.backlogRepo, `docs/backlog-detail/${slug}.md`, sprintBranch);
+          const md = await Repos.getFile(CONFIG.username, state.backlogRepo, `docs/backlog-detail/${slug.toLowerCase()}.md`, sprintBranch);
           if (!md) return null;
           const fm = parseFrontmatter(md);
           return {
