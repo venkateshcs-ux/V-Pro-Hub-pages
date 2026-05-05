@@ -226,7 +226,8 @@ window.BacklogView = (() => {
           if (!md) return null;
           const fm = parseFrontmatter(md);
           return {
-            id: String(fm.id || slug),
+            // Preserve committed_items casing so the membership filter still matches
+            id: slug,
             products: ['V-Pro-Hub'],
             name: fm.title || slug,
             type: '—', sessionType: '—', phase: '—',
