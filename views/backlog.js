@@ -210,7 +210,38 @@ window.BacklogView = (() => {
     const adaptations = parseAdaptations(detailMd);
     const dailyLog    = parseDailyLog(detailMd);
     const acMap       = parseSprintReadyAC(detailMd);  // Ignored if no detail block
-    const backlogMap  = Object.fromEntries(state.items.map(i => [parseInt(i.id), i]));
+
+    // Per-sprint split-read (#85 schema): committed_items may include slug IDs
+    // (e.g. "97-narrowed", "EXP-001") that aren't BACKLOG.md rows. Source-of-truth
+    // for those is docs/backlog-detail/<slug>.md on the sprint branch. Fetch + synthesize.
+    const sprintBranch = frontmatter.branch || null;
+    const committedRaw = (frontmatter.committed_items || []).map(String);
+    const existingIds = new Set(state.items.map(i => String(i.id)));
+    const missingSlugs = committedRaw.filter(c => !existingIds.has(c));
+    if (missingSlugs.length && sprintBranch) {
+      const STATUS_MAP = { 'in-progress': 'In Progress ▶', 'done': 'Done ✓', 'blocked': '⏸ Blocked', 'open': 'Open' };
+      const synthesized = await Promise.all(missingSlugs.map(async slug => {
+        try {
+          const md = await Repos.getFile(CONFIG.username, state.backlogRepo, `docs/backlog-detail/${slug}.md`, sprintBranch);
+          if (!md) return null;
+          const fm = parseFrontmatter(md);
+          return {
+            id: String(fm.id || slug),
+            products: ['V-Pro-Hub'],
+            name: fm.title || slug,
+            type: '—', sessionType: '—', phase: '—',
+            priority: fm.priority || '—',
+            status: STATUS_MAP[fm.status] || fm.status || 'Open',
+            aiTool: '—', rank: null, reason: null, customReason: null,
+            _synthesized: true,
+          };
+        } catch { return null; }
+      }));
+      for (const it of synthesized) if (it) state.items.push(it);
+    }
+
+    // Keyed by string id so both numeric ("85") and slug ("97-narrowed") IDs resolve
+    const backlogMap = Object.fromEntries(state.items.map(i => [String(i.id), i]));
 
     const health = computeHealthMetrics(frontmatter, planItems, backlogMap, adaptations, dailyLog);
     const drift  = computeDriftFlags(health, adaptations);
@@ -365,7 +396,7 @@ window.BacklogView = (() => {
   }
 
   function computeHealthMetrics(fm, planItems, backlogMap, adaptations, dailyLog) {
-    const committed = (fm.committed_items || []).map(Number);
+    const committed = (fm.committed_items || []).map(String);
     const todayIso = new Date().toISOString().split('T')[0];
     const start = fm.start || todayIso;
     const dayOfSprint = Math.max(1, Math.round((new Date(todayIso) - new Date(start)) / 86400000) + 1);
@@ -463,16 +494,15 @@ window.BacklogView = (() => {
     opts = opts || {};
     const q = state.searchQuery.trim().toLowerCase().replace(/^#/, '');
     const committedSet = state.activeSprint ?
-      new Set((state.activeSprint.frontmatter.committed_items || []).map(Number)) :
+      new Set((state.activeSprint.frontmatter.committed_items || []).map(String)) :
       new Set();
 
     return state.items.filter(i => {
       if (state.productFilter !== 'All' && !i.products.includes(state.productFilter)) return false;
       if (state.sessionFilter !== 'All' && i.sessionType !== state.sessionFilter) return false;
 
-      // Sprint filter
-      const idNum = parseInt(i.id);
-      const inCurrent = committedSet.has(idNum);
+      // Sprint filter — slug-aware (#85 schema): committed_items may contain non-numeric IDs
+      const inCurrent = committedSet.has(String(i.id));
       if (state.sprintFilter === 'Current' && !inCurrent) return false;
       if (state.sprintFilter === 'No sprint' && inCurrent) return false;
       // 'Past' / 'range' would need sprint-history tracking — for v1, treat as 'All sprints'

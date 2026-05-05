@@ -126,9 +126,9 @@ const Repos = (() => {
     return _adapterFor(owner).getIssues(owner, repo);
   }
 
-  /** Get file content — routes by owner */
-  async function getFile(owner, repo, path) {
-    return _adapterFor(owner).getFile(owner, repo, path);
+  /** Get file content — routes by owner. Optional `branch` reads a specific ref (GitHub only for now). */
+  async function getFile(owner, repo, path, branch) {
+    return _adapterFor(owner).getFile(owner, repo, path, branch);
   }
 
 

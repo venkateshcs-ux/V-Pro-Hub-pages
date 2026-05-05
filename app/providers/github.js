@@ -87,17 +87,19 @@ class GitHubAdapter {
     return data;
   }
 
-  /** Get raw file content from a repo (returns decoded string or null) */
-  async getFile(owner, repo, path) {
+  /** Get raw file content from a repo (returns decoded string or null).
+   *  Optional `branch` param reads from a specific ref (default = repo default branch). */
+  async getFile(owner, repo, path, branch) {
+    const refSuffix = branch ? `?ref=${encodeURIComponent(branch)}` : '';
     try {
-      const data = await this._request(`/repos/${owner}/${repo}/contents/${path}`);
+      const data = await this._request(`/repos/${owner}/${repo}/contents/${path}${refSuffix}`);
       if (data.encoding === 'base64') {
         return GitHubAdapter._decodeBase64Utf8(data.content.replace(/\n/g, ''));
       }
-      return await this._getFileViaTree(owner, repo, path);
+      return await this._getFileViaTree(owner, repo, path, branch);
     } catch (e) {
       if (e.message.includes('404')) {
-        try { return await this._getFileViaTree(owner, repo, path); }
+        try { return await this._getFileViaTree(owner, repo, path, branch); }
         catch { return null; }
       }
       throw e;
@@ -170,10 +172,16 @@ class GitHubAdapter {
 
   // ── Private fallback ────────────────────────────
 
-  /** Resolve a file via the git tree + blob (fallback for /contents/ 404s) */
-  async _getFileViaTree(owner, repo, path) {
-    const repoData  = await this._request(`/repos/${owner}/${repo}`);
-    const candidates = [repoData.default_branch, 'master', 'main'].filter(Boolean);
+  /** Resolve a file via the git tree + blob (fallback for /contents/ 404s).
+   *  If `branch` is provided, only that branch is consulted. */
+  async _getFileViaTree(owner, repo, path, branch) {
+    let candidates;
+    if (branch) {
+      candidates = [branch];
+    } else {
+      const repoData  = await this._request(`/repos/${owner}/${repo}`);
+      candidates = [repoData.default_branch, 'master', 'main'].filter(Boolean);
+    }
     const seen = new Set();
 
     for (const branch of candidates) {
