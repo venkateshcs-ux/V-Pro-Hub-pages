@@ -444,7 +444,14 @@ window.BacklogView = (() => {
       // session_class deliberately excluded — already rendered as tag chip
       // by the panel; including it here would duplicate (S055 cosmetic fix).
       const body = [];
-      if (fm.commits_total != null) body.push(`${fm.commits_total} commit(s)`);
+      // S055-10: surface quarantine state visibly so the user knows the card
+      // hasn't been hand-verified against canonical sources yet
+      if (fm.status === 'needs-reverification') body.push(`⚠ pending re-verification (sub-agent backfill)`);
+      if (fm.commits_total != null) {
+        const closeNote = (fm.commits_at_close != null && fm.commits_at_close !== fm.commits_total)
+          ? ` (${fm.commits_at_close} at close)` : '';
+        body.push(`${fm.commits_total} commit(s)${closeNote}`);
+      }
       if (fm.time_actual_hours != null) body.push(`${fm.time_actual_hours}h actual`);
       if (fm.effectiveness_claude_overall) body.push(`claude=${fm.effectiveness_claude_overall}`);
       if (fm.effectiveness_venkatesh_overall) body.push(`venkatesh=${fm.effectiveness_venkatesh_overall}`);
