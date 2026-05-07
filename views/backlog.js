@@ -440,10 +440,11 @@ window.BacklogView = (() => {
     for (const r of fetched) {
       if (!r) continue;
       const { id, fm } = r;
-      // Build display body from structured fields (no prose parsing)
+      // Build display body from structured fields (no prose parsing).
+      // session_class deliberately excluded — already rendered as tag chip
+      // by the panel; including it here would duplicate (S055 cosmetic fix).
       const body = [];
       if (fm.commits_total != null) body.push(`${fm.commits_total} commit(s)`);
-      if (fm.session_class) body.push(fm.session_class);
       if (fm.time_actual_hours != null) body.push(`${fm.time_actual_hours}h actual`);
       if (fm.effectiveness_claude_overall) body.push(`claude=${fm.effectiveness_claude_overall}`);
       if (fm.effectiveness_venkatesh_overall) body.push(`venkatesh=${fm.effectiveness_venkatesh_overall}`);
