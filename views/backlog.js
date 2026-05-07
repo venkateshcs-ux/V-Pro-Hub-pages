@@ -246,7 +246,19 @@ window.BacklogView = (() => {
 
     const health = computeHealthMetrics(frontmatter, planItems, backlogMap, adaptations, dailyLog);
     const drift  = computeDriftFlags(health, adaptations);
-    const sessions = sessionsFromDailyLog(dailyLog);
+    // Sessions panel — D141 deterministic-infra principle (S055): read from
+    // session cards at docs/backlog-detail/S0NN.md (canonical source) using
+    // sprint frontmatter `sessions:` field as the index. Fall back to legacy
+    // prose-parsed daily log if `sessions:` field missing OR no card-fetch
+    // succeeds (transitional period — Sprint 4 retires fallback entirely).
+    let sessions = [];
+    if (Array.isArray(frontmatter.sessions) && frontmatter.sessions.length) {
+      sessions = await sessionsFromCards(frontmatter.sessions, sprintBranch);
+    }
+    if (!sessions.length) {
+      // Fallback to legacy prose parser (deprecated; retired Sprint 4)
+      sessions = sessionsFromDailyLog(dailyLog);
+    }
 
     return {
       id: active.id,
@@ -385,6 +397,49 @@ window.BacklogView = (() => {
         });
       }
     }
+    return out;
+  }
+
+  // D141 deterministic-infra (S055): Sessions panel reads canonical session
+  // cards at docs/backlog-detail/S0NN.md. Each card has structured frontmatter
+  // (per docs/SCHEMA_SESSION_CARD.md). Sprint frontmatter `sessions:` array
+  // is the index of which session ids belong to this sprint.
+  async function sessionsFromCards(sessionIds, sprintBranch) {
+    if (!Array.isArray(sessionIds) || !sessionIds.length) return [];
+    const out = [];
+    const fetched = await Promise.all(sessionIds.map(async sid => {
+      const id = String(sid);
+      try {
+        const md = await Repos.getFile(
+          CONFIG.username, state.backlogRepo,
+          `docs/backlog-detail/${id}.md`, sprintBranch || null
+        );
+        if (!md) return null;
+        const fm = parseFrontmatter(md);
+        return { id, fm };
+      } catch { return null; }
+    }));
+    for (const r of fetched) {
+      if (!r) continue;
+      const { id, fm } = r;
+      // Build display body from structured fields (no prose parsing)
+      const body = [];
+      if (fm.commits_total != null) body.push(`${fm.commits_total} commit(s)`);
+      if (fm.session_class) body.push(fm.session_class);
+      if (fm.time_actual_hours != null) body.push(`${fm.time_actual_hours}h actual`);
+      if (fm.effectiveness_claude_overall) body.push(`claude=${fm.effectiveness_claude_overall}`);
+      if (fm.effectiveness_venkatesh_overall) body.push(`venkatesh=${fm.effectiveness_venkatesh_overall}`);
+      out.push({
+        id,
+        date: fm.date_start || '',
+        focus: fm.title || '',
+        tag: fm.session_class || '',
+        body: body.slice(0, 4),
+        more: Math.max(0, body.length - 4),
+      });
+    }
+    // Sort by id ascending (S043, S044, ...)
+    out.sort((a, b) => String(a.id).localeCompare(String(b.id)));
     return out;
   }
 
