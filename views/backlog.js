@@ -275,7 +275,25 @@ window.BacklogView = (() => {
     for (const line of match[1].split('\n')) {
       const m = line.match(/^([\w_]+):\s*(.*)/);
       if (!m) continue;
-      const key = m[1]; const raw = m[2].trim();
+      const key = m[1];
+      // Strip trailing YAML comment (everything from " #" onward, but only OUTSIDE
+      // brackets — inline arrays may contain # in elements, though rare). Bug fix
+      // S055: previously comment-suffixed array lines (e.g. `sessions: [S043, ...] # note`)
+      // failed the /^\[.*\]$/ test and parsed as strings. D141 dogfood — sprint
+      // frontmatter `sessions:` index field carries explanatory comment.
+      let raw = m[2];
+      let inBracket = 0;
+      let cutAt = -1;
+      for (let i = 0; i < raw.length; i++) {
+        const ch = raw[i];
+        if (ch === '[') inBracket++;
+        else if (ch === ']') inBracket--;
+        else if (ch === '#' && inBracket === 0 && (i === 0 || raw[i-1] === ' ' || raw[i-1] === '\t')) {
+          cutAt = i; break;
+        }
+      }
+      if (cutAt >= 0) raw = raw.slice(0, cutAt);
+      raw = raw.trim();
       if (raw === 'null' || raw === '') { result[key] = null; continue; }
       if (raw === 'true')  { result[key] = true; continue; }
       if (raw === 'false') { result[key] = false; continue; }
