@@ -4524,6 +4524,15 @@
     };
   }
 </script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>
+  // Mermaid init (S056 #105 Phase 3.1) — dark theme matches V-Pro-Hub UI; loose
+  // securityLevel allows interactivity on rendered diagrams. startOnLoad disabled
+  // because views/ai-collab-guide.js calls mermaid.run() after async markdown render.
+  if (window.mermaid && typeof window.mermaid.initialize === 'function') {
+    window.mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' });
+  }
+</script>
 <script src="app/providers/github.js"></script>
 <script src="app/providers/bitbucket.js"></script>
 <script src="app/repos.js"></script>
@@ -4538,7 +4547,7 @@
 <script src="views/backlog.js?v=S055g"></script>
 <script src="views/project.js?v=S038b"></script>
 <script src="views/health.js?v=C12"></script>
-<script src="views/ai-collab-guide.js?v=S056a"></script>
+<script src="views/ai-collab-guide.js?v=S056b"></script>
 <script src="views/architecture.js?v=S07"></script>
 <script src="views/investment.js?v=S10"></script>
 <script src="views/settings.js?v=C10"></script>

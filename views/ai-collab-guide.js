@@ -27,8 +27,19 @@ window.AiGuideView = (() => {
       // Code block toggle
       if (line.startsWith('```')) {
         if (inCodeBlock) {
-          const langClass = codeLang ? ` lang-${escHtml(codeLang)}` : '';
-          html += `<pre class="md-code"><code class="${langClass}">${escHtml(codeBuffer.join('\n'))}</code></pre>`;
+          if (codeLang.toLowerCase() === 'mermaid') {
+            // S056 #105 Phase 3.1 — emit a mermaid div for live SVG render.
+            // Graceful fallback: if window.mermaid isn't loaded, render as a
+            // labeled code block so source is still readable.
+            if (typeof window !== 'undefined' && window.mermaid) {
+              html += `<div class="mermaid ag-mermaid">${escHtml(codeBuffer.join('\n'))}</div>`;
+            } else {
+              html += `<pre class="md-code lang-mermaid"><code class="lang-mermaid">${escHtml(codeBuffer.join('\n'))}</code></pre>`;
+            }
+          } else {
+            const langClass = codeLang ? ` lang-${escHtml(codeLang)}` : '';
+            html += `<pre class="md-code"><code class="${langClass}">${escHtml(codeBuffer.join('\n'))}</code></pre>`;
+          }
           codeBuffer  = [];
           codeLang    = '';
           inCodeBlock = false;
@@ -344,6 +355,8 @@ window.AiGuideView = (() => {
       .ag-body .md-hr { border: 0; border-top: 1px solid var(--border, #2a3142); margin: 18px 0; }
       .ag-body .md-link { color: var(--accent, #7ab8ff); text-decoration: none; }
       .ag-body .md-link:hover { text-decoration: underline; }
+      .ag-body .ag-mermaid { display: flex; justify-content: center; margin: 18px 0; padding: 16px; background: rgba(0, 0, 0, 0.18); border: 1px solid var(--border, #2a3142); border-radius: 8px; overflow-x: auto; }
+      .ag-body .ag-mermaid svg { max-width: 100%; height: auto; }
       @media (max-width: 900px) {
         .ag-shell { grid-template-columns: 1fr; }
         .ag-sidebar { position: static; max-height: none; }
@@ -390,6 +403,21 @@ window.AiGuideView = (() => {
           </div>
         </main>
       </div>`;
+
+      // S056 #105 Phase 3.1 — render mermaid diagrams to SVG (best-effort).
+      // Mermaid runs after innerHTML is committed so .mermaid divs exist in DOM.
+      // Errors are logged but don't break the guide render — the raw source
+      // remains visible inside the div as a fallback.
+      try {
+        if (window.mermaid && typeof window.mermaid.run === 'function') {
+          const targets = container.querySelectorAll('.ag-mermaid');
+          if (targets.length) {
+            await window.mermaid.run({ nodes: Array.from(targets) });
+          }
+        }
+      } catch (mermaidErr) {
+        console.warn('[ai-collab-guide] mermaid render failed:', mermaidErr);
+      }
 
       // Wire ToC links: smooth-scroll to in-page anchor
       container.querySelectorAll('.ag-toc-link').forEach(a => {
