@@ -11,6 +11,7 @@ const ROUTES = {
   backlog:   { label: 'Backlog',        icon: '◐', built: true,  step: 'C8',  desc: 'Backlog 2.0 — prioritization + sprint kanban + dashboard merger', viewModule: 'BacklogView'   },
   project:   { label: 'Project',        icon: '◑', built: true,  step: '#88', desc: 'Layer B project surface (per-project — pass id as param, e.g. #/project/vhalli)', viewModule: 'ProjectView'   },
   health:    { label: 'Health Check',   icon: '◑', built: true,  step: 'C11', desc: 'Product health at a glance',  viewModule: 'HealthView'    },
+  aiGuide:   { label: 'AI Guide',       icon: '◊', built: true,  step: '#105', desc: 'Working with AI: predictive × deterministic — co-authored education guide', viewModule: 'AiGuideView' },
   architecture: { label: 'Architecture', icon: '◇', built: true, step: '#19', desc: 'Multi-provider architecture', viewModule: 'ArchitectureView' },
   investment: { label: 'AI Investment', icon: '◆', built: true, step: '#29', desc: 'Plan costs, tool ranking, break-even', viewModule: 'InvestmentView' },
   settings:  { label: 'Settings',       icon: '◌', built: true,  step: 'C7',  desc: 'PAT, preferences, intervals', viewModule: 'SettingsView'  },
