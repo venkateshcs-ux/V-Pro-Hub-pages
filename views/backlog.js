@@ -524,12 +524,12 @@ window.BacklogView = (() => {
     // S061/#119 — YAML block-list-of-objects support (committed_items[], bg_carries[],
     // mid_sprint_adds[], swaps[], etc. per D144 sprint frontmatter schema). Detected by
     // a top-level key whose value-line is empty AND whose next non-blank line begins
-    // with two-space indent + dash (`  -`). For each such block, collect the inner
-    // `id:` values and emit a flat array at the parent key (preserves the legacy
-    // consumer shape: `(frontmatter.committed_items || []).map(String)`). Other fields
-    // inside each dash-bullet (slot, layer, title, etc.) are discarded — consumers
-    // that need them should fetch the full card per-id.
-    const blockListIds = {};  // parent_key → [id1, id2, ...]
+    // with two-space indent + dash (`  -`).
+    // S068/#130 — extended: now collects FULL bullet objects (id + status + text +
+    // other scalar sub-fields) so consumers like deriveCardStatus() can read nested
+    // status fields on todos[]/done_criteria[] items. Legacy consumers (committed_items
+    // etc.) still get flat-ID arrays at emit time — see emit logic below.
+    const blockListFull = {};  // parent_key → [{id, status, text, ...}, ...]
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       const m = line.match(/^([\w_]+):\s*$/);  // top-level key with empty value
@@ -539,29 +539,40 @@ window.BacklogView = (() => {
       let j = i + 1;
       while (j < lines.length && /^\s*(#.*)?$/.test(lines[j])) j++;
       if (j >= lines.length || !/^\s{2}-\s/.test(lines[j])) continue;
-      const ids = [];
+      const bullets = [];
+      let cur = null;  // current bullet object being built
       while (j < lines.length) {
         const li = lines[j];
         if (/^\S/.test(li)) break;  // top-level key reached → end of block list
         if (/^\s*$/.test(li)) { j++; continue; }
         if (/^\s*#/.test(li)) { j++; continue; }
-        // `  - id: "80"` or `  - id: 80` form
-        const idm = li.match(/^\s{2}-\s+id:\s*["']?([^"'#\s]+)["']?/);
-        if (idm) {
-          ids.push(idm[1]);
+        // `  - id: "80"` or `  - id: 80` form — START of a new bullet
+        const bulletStart = li.match(/^\s{2}-\s+([\w_]+):\s*(.*)$/);
+        if (bulletStart) {
+          if (cur) bullets.push(cur);
+          cur = {};
+          const k = bulletStart[1];
+          let v = bulletStart[2];
+          // Strip inline `# comment` per S062 fix (only outside brackets)
+          v = v.replace(/\s+#.*$/, '').trim().replace(/^["']|["']$/g, '');
+          cur[k] = v;
           j++;
           continue;
         }
-        // Inner property of current bullet (further-indented `    key: value`) — skip
+        // `    status: done` form — INNER property of current bullet
+        const inner = li.match(/^\s{4,}([\w_]+):\s*(.*)$/);
+        if (inner && cur) {
+          const k = inner[1];
+          let v = inner[2];
+          v = v.replace(/\s+#.*$/, '').trim().replace(/^["']|["']$/g, '');
+          cur[k] = v;
+          j++;
+          continue;
+        }
         j++;
       }
-      if (ids.length > 0) {
-        blockListIds[parentKey] = ids;
-      } else {
-        // Block list existed but had no `id:` fields (e.g. swaps[] of plain objects).
-        // Emit empty array so consumers can iterate safely.
-        blockListIds[parentKey] = [];
-      }
+      if (cur) bullets.push(cur);
+      blockListFull[parentKey] = bullets;
     }
 
     for (const line of lines) {
@@ -597,10 +608,19 @@ window.BacklogView = (() => {
       }
       result[key] = raw.replace(/^["']|["']$/g, '');
     }
-    // Overlay block-list IDs (S061/#119): override null/string entries for keys that
-    // parsed as block-lists-of-objects with the extracted id[] array.
-    for (const [k, ids] of Object.entries(blockListIds)) {
-      result[k] = ids;
+    // Overlay block-list (S061/#119 + S068/#130): override null/string entries for keys
+    // that parsed as block-lists-of-objects.
+    // - Legacy keys (committed_items / bg_carries / mid_sprint_adds / swaps / dependencies):
+    //   emit FLAT ID array (preserves the existing consumer contract per S061).
+    // - Object-shape keys (todos / done_criteria / team): emit ARRAY OF OBJECTS so
+    //   consumers like deriveCardStatus() can read nested sub-fields (S068/#130).
+    const OBJECT_SHAPE_KEYS = new Set(['todos', 'done_criteria', 'team']);
+    for (const [k, bullets] of Object.entries(blockListFull)) {
+      if (OBJECT_SHAPE_KEYS.has(k)) {
+        result[k] = bullets;  // [{id, status, text, ...}, ...]
+      } else {
+        result[k] = bullets.map(b => b.id).filter(id => id != null);  // flat IDs (legacy)
+      }
     }
     return result;
   }
