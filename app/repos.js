@@ -155,6 +155,25 @@ const Repos = (() => {
     return _primary().getRateLimit();
   }
 
-  return { getUser, listRepos, getRepo, getCommits, getIssues, getFile, getFileWithSha, putFile, getRateLimit };
+  /** List branches — routes by owner. Used by ActiveSprint for sprint/Sprint-* enumeration (#119). */
+  async function listBranches(owner, repo, perPage = 100) {
+    const adapter = _adapterFor(owner);
+    if (typeof adapter.listBranches !== 'function') {
+      throw new Error(`Adapter for ${owner} does not support listBranches`);
+    }
+    return adapter.listBranches(owner, repo, perPage);
+  }
+
+  /** List directory contents at a specific branch — routes by owner. Used by ActiveSprint
+   *  to discover SP-*.md file on each sprint branch (#119). */
+  async function listDirectory(owner, repo, path, branch) {
+    const adapter = _adapterFor(owner);
+    if (typeof adapter.listDirectory !== 'function') {
+      throw new Error(`Adapter for ${owner} does not support listDirectory`);
+    }
+    return adapter.listDirectory(owner, repo, path, branch);
+  }
+
+  return { getUser, listRepos, getRepo, getCommits, getIssues, getFile, getFileWithSha, putFile, getRateLimit, listBranches, listDirectory };
 
 })();

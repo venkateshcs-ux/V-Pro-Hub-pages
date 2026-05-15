@@ -170,6 +170,26 @@ class GitHubAdapter {
     return data;
   }
 
+  /** List all branches in a repo.
+   *  Returns array of { name, commit: { sha, url }, protected: boolean }.
+   *  Used by ActiveSprint for sprint/Sprint-* enumeration (#119 S061). */
+  async listBranches(owner, repo, perPage = 100) {
+    const data = await this._request(`/repos/${owner}/${repo}/branches?per_page=${perPage}`);
+    if (Array.isArray(data)) data.forEach(b => { b.provider = 'github'; });
+    return data;
+  }
+
+  /** List entries in a directory at a specific branch.
+   *  Returns array of { name, type:'file'|'dir', path, sha, size, ... }.
+   *  Used by ActiveSprint to discover the SP-*.md file on each sprint branch (#119 S061). */
+  async listDirectory(owner, repo, path, branch) {
+    const refSuffix = branch ? `?ref=${encodeURIComponent(branch)}` : '';
+    const cleanPath = (path || '').replace(/^\/+|\/+$/g, '');
+    const data = await this._request(`/repos/${owner}/${repo}/contents/${cleanPath}${refSuffix}`);
+    if (Array.isArray(data)) data.forEach(e => { e.provider = 'github'; });
+    return data;
+  }
+
   // ── Private fallback ────────────────────────────
 
   /** Resolve a file via the git tree + blob (fallback for /contents/ 404s).
