@@ -388,12 +388,65 @@ window.BacklogView = (() => {
       sessions = sessionsFromDailyLog(dailyLog);
     }
 
+    // S067/#129 — Build sprint-membership map from per-card frontmatter (D141 SoT, tier-1).
+    // Replaces the old committed_items[]-array-membership filter (which ignored
+    // mid_sprint_adds[] and bg_carries[]). Per-card `sprint:` field in frontmatter
+    // is the canonical authority. The 3 sprint-frontmatter arrays remain useful as
+    // planning + retro analytics projections, but no longer gatekeep visibility.
+    const sprintMembership = await buildSprintMembership(CONFIG.username, state.backlogRepo, sprintBranch, active.id, frontmatter);
+
     return {
       id: active.id,
       meta: active,
       frontmatter, planItems, backlogMap, acMap, adaptations, dailyLog,
-      health, drift, sessions,
+      health, drift, sessions, sprintMembership,
     };
+  }
+
+  // S067/#129 — Sprint membership derivation from per-card frontmatter (D141 SoT).
+  // Lists docs/backlog-detail/ on the sprint branch + Promise.all-fetches each
+  // per-card frontmatter + builds Map<id, sprintId>. Skips session cards (S0NN.md).
+  // Logs drift if a card's sprint field differs from sprint-frontmatter array
+  // membership. Returns empty Map on fail-soft.
+  async function buildSprintMembership(owner, repo, sprintBranch, expectedSprintId, sprintFrontmatter) {
+    const map = new Map();
+    if (!Repos || typeof Repos.listDirectory !== 'function') return map;
+    let entries;
+    try {
+      entries = await Repos.listDirectory(owner, repo, 'docs/backlog-detail', sprintBranch);
+    } catch (err) {
+      console.warn('[backlog] #129 buildSprintMembership: listDirectory failed', err && err.message);
+      return map;
+    }
+    if (!Array.isArray(entries)) return map;
+    const detailFiles = entries.filter(e =>
+      e && e.type === 'file' && /\.md$/.test(e.name) && !/^S\d/.test(e.name)
+    );
+    await Promise.all(detailFiles.map(async f => {
+      try {
+        const md = await Repos.getFile(owner, repo, `docs/backlog-detail/${f.name}`, sprintBranch);
+        if (!md) return;
+        const fm = parseFrontmatter(md);
+        if (!fm || !fm.sprint) return;
+        const id = String(fm.backlog_ref || fm.id || f.name.replace(/\.md$/, ''));
+        map.set(id, String(fm.sprint));
+      } catch { /* fail-soft */ }
+    }));
+    // Drift detection: log cards with sprint: ID in frontmatter SoT but missing
+    // from sprint-frontmatter arrays (informational; helps Retro analytics).
+    if (expectedSprintId && sprintFrontmatter) {
+      const inAnyArray = new Set([
+        ...(sprintFrontmatter.committed_items || []).map(c => String(c && c.id != null ? c.id : c)),
+        ...(sprintFrontmatter.bg_carries      || []).map(c => String(c && c.id != null ? c.id : c)),
+        ...(sprintFrontmatter.mid_sprint_adds || []).map(c => String(c && c.id != null ? c.id : c)),
+      ]);
+      const sotInSprint = [...map.entries()].filter(([id, sp]) => sp === expectedSprintId).map(([id]) => id);
+      const missingFromArrays = sotInSprint.filter(id => !inAnyArray.has(id));
+      if (missingFromArrays.length > 0) {
+        console.info(`[backlog] #129 SoT-vs-projection drift: ${missingFromArrays.length} card(s) have sprint:${expectedSprintId} in frontmatter but appear in no sprint-frontmatter array — projection lag, not a bug. Cards: ${missingFromArrays.join(', ')}`);
+      }
+    }
+    return map;
   }
 
   // D146/#120 — Lazy-load closed sprint branches for the Past filter panel.
@@ -794,16 +847,31 @@ window.BacklogView = (() => {
   function filteredItems(opts) {
     opts = opts || {};
     const q = state.searchQuery.trim().toLowerCase().replace(/^#/, '');
-    const committedSet = state.activeSprint ?
-      new Set((state.activeSprint.frontmatter.committed_items || []).map(String)) :
-      new Set();
+    // S067/#129 — Sprint membership now derived from per-card frontmatter (D141 SoT, tier-1).
+    // Authority: card frontmatter `sprint:` field. The 3 sprint-frontmatter arrays
+    // (committed_items / bg_carries / mid_sprint_adds) remain as planning + retro
+    // projections, but no longer gatekeep visibility. Fallback to the legacy
+    // committed_items[] union (committed + carries + adds) only if sprintMembership
+    // is empty (e.g., listDirectory failed) — fail-safe to "show something" rather
+    // than nothing. Cards with no frontmatter file fall back to legacy union too.
+    const sprintMembership = (state.activeSprint && state.activeSprint.sprintMembership) || new Map();
+    const activeSprintId = state.activeSprint && state.activeSprint.id;
+    const legacyUnion = state.activeSprint ? new Set([
+      ...((state.activeSprint.frontmatter.committed_items || []).map(c => String(c && c.id != null ? c.id : c))),
+      ...((state.activeSprint.frontmatter.bg_carries      || []).map(c => String(c && c.id != null ? c.id : c))),
+      ...((state.activeSprint.frontmatter.mid_sprint_adds || []).map(c => String(c && c.id != null ? c.id : c))),
+    ]) : new Set();
+    const useSoT = sprintMembership.size > 0;
 
     return state.items.filter(i => {
       if (state.productFilter !== 'All' && !i.products.includes(state.productFilter)) return false;
       if (state.sessionFilter !== 'All' && i.sessionType !== state.sessionFilter) return false;
 
-      // Sprint filter — slug-aware (#85 schema): committed_items may contain non-numeric IDs
-      const inCurrent = committedSet.has(String(i.id));
+      // Sprint filter — #129 tier-1 (frontmatter SoT) with legacy-union fallback
+      const idStr = String(i.id);
+      const inCurrent = useSoT
+        ? (sprintMembership.get(idStr) === activeSprintId) || legacyUnion.has(idStr)
+        : legacyUnion.has(idStr);
       if (state.sprintFilter === 'Current' && !inCurrent) return false;
       if (state.sprintFilter === 'No sprint' && inCurrent) return false;
       // 'Past' filter under D146/#120: items in this view are still all-items;
