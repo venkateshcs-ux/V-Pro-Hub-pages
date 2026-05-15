@@ -346,28 +346,15 @@ window.BacklogView = (() => {
     }
 
     // S061/#119 — Per-card status overlay (D141 canonical SoT per item).
-    // BACKLOG.md row Status column is denormalized + lags behind per-card status
-    // flips (Venkatesh-flagged drift at S057). Per D141, the per-card detail file
-    // frontmatter `status:` is the granular SoT. Overlay it onto state.items for
-    // every committed ID so the kanban + tile counters reflect actual per-card
-    // status, not the stale BACKLOG row text.
-    const presentInBacklog = committedRaw.filter(c => existingIds.has(c));
-    if (presentInBacklog.length && sprintBranch) {
-      await Promise.all(presentInBacklog.map(async id => {
-        try {
-          const md = await Repos.getFile(CONFIG.username, state.backlogRepo, `docs/backlog-detail/${String(id).toLowerCase()}.md`, sprintBranch);
-          if (!md) return;
-          const fm = parseFrontmatter(md);
-          if (!fm.status) return;
-          const overlay = STATUS_MAP[fm.status] || fm.status;
-          const item = state.items.find(it => String(it.id) === String(id));
-          if (item) {
-            item.status = overlay;
-            item._cardStatus = fm.status;  // marker for debugging
-          }
-        } catch { /* fail-soft — keep BACKLOG row Status */ }
-      }));
-    }
+    // S068/#130 — EXTENDED: status now derived from todos[]+done_criteria[] aggregate
+    // (tier-1 per `feedback_solution_must_be_100_percent_deterministic.md`) instead
+    // of relying on the procedurally-flipped `status:` string field. Derivation
+    // falls back to parsed fm.status if no todos AND no dcs present.
+    // ALSO EXTENDED: overlay now covers ALL sprint cards (not just committed_items[]),
+    // pairing with #129 sprintMembership so infra cards in mid_sprint_adds[] also
+    // get accurate kanban status. Skipped — moved below buildSprintMembership which
+    // already fetches each card's frontmatter; we'll do the overlay after that pass
+    // to avoid duplicate API calls.
 
     // Keyed by string id so both numeric ("85") and slug ("97-narrowed") IDs resolve
     const backlogMap = Object.fromEntries(state.items.map(i => [String(i.id), i]));
@@ -403,7 +390,31 @@ window.BacklogView = (() => {
     };
   }
 
+  // S068/#130 — Derive card status from todos[]+done_criteria[] aggregate (D141 SoT, tier-1).
+  // Returns one of 'done' | 'blocked' | 'in-progress' | 'candidate', or null if no
+  // todos AND no dcs present (caller falls back to parsed fm.status string field).
+  // Replaces procedural status-field flip with deterministic derivation per
+  // `feedback_solution_must_be_100_percent_deterministic.md` rule.
+  function deriveCardStatus(fm) {
+    if (!fm) return null;
+    const todos = Array.isArray(fm.todos) ? fm.todos : [];
+    const dcs   = Array.isArray(fm.done_criteria) ? fm.done_criteria : [];
+    if (todos.length === 0 && dcs.length === 0) return null;
+    const norm = v => String(v == null ? '' : v).toLowerCase().trim();
+    const todoDone = todos.every(t => t && ['done', 'skipped', 'na', 'n/a'].includes(norm(t.status)));
+    const dcDone   = dcs.every(d => d && norm(d.status) === 'met');
+    if (todoDone && dcDone) return 'done';
+    const anyBlocked = todos.some(t => t && norm(t.status) === 'blocked') ||
+                       dcs.some(d => d && norm(d.status) === 'blocked');
+    if (anyBlocked) return 'blocked';
+    const anyProgress = todos.some(t => t && ['done', 'in-progress'].includes(norm(t.status))) ||
+                        dcs.some(d => d && norm(d.status) === 'met');
+    if (anyProgress) return 'in-progress';
+    return 'candidate';
+  }
+
   // S067/#129 — Sprint membership derivation from per-card frontmatter (D141 SoT).
+  // S068/#130 — also overlays derived status onto state.items during the same fetch.
   // Lists docs/backlog-detail/ on the sprint branch + Promise.all-fetches each
   // per-card frontmatter + builds Map<id, sprintId>. Skips session cards (S0NN.md).
   // Logs drift if a card's sprint field differs from sprint-frontmatter array
@@ -422,14 +433,47 @@ window.BacklogView = (() => {
     const detailFiles = entries.filter(e =>
       e && e.type === 'file' && /\.md$/.test(e.name) && !/^S\d/.test(e.name)
     );
+    // S068/#130 — payload extended: also write derived status overlay onto state.items
+    // during the same per-card frontmatter fetch (single API pass for #129 sprint
+    // membership + #130 status derivation). Status derivation rules per #130:
+    //   if every todo.status in {done, skipped, na} AND every dc.status in {met} → 'done'
+    //   else if any todo/dc blocked → 'blocked'
+    //   else if any todo done OR any dc met → 'in-progress'
+    //   else → 'candidate'
+    //   if no todos AND no dcs → null (fall back to parsed fm.status field)
+    const STATUS_MAP_LOCAL = {
+      'in-progress': 'In Progress ▶',
+      'done': 'Done ✓',
+      'blocked': '⏸ Blocked',
+      'open': 'Open',
+      'candidate': 'Not started',
+      'planning': 'Not started',
+      'closed': 'Done ✓',
+      'needs-reverification': 'Not started',
+    };
     await Promise.all(detailFiles.map(async f => {
       try {
         const md = await Repos.getFile(owner, repo, `docs/backlog-detail/${f.name}`, sprintBranch);
         if (!md) return;
         const fm = parseFrontmatter(md);
-        if (!fm || !fm.sprint) return;
+        if (!fm) return;
         const id = String(fm.backlog_ref || fm.id || f.name.replace(/\.md$/, ''));
-        map.set(id, String(fm.sprint));
+        // #129 — sprint membership (only if fm.sprint present)
+        if (fm.sprint) map.set(id, String(fm.sprint));
+        // #130 — status derivation + overlay (runs regardless of fm.sprint presence
+        // so legacy cards without a sprint: field still benefit from derivation)
+        const derived = deriveCardStatus(fm);
+        const effective = derived || (fm.status ? String(fm.status).toLowerCase().split(/\s+/)[0] : null);
+        if (effective) {
+          const overlay = STATUS_MAP_LOCAL[effective] || fm.status;
+          const item = state.items.find(it => String(it.id) === String(id));
+          if (item) {
+            item.status = overlay;
+            item._cardStatus = fm.status;          // raw fm.status for debugging
+            item._derivedStatus = derived;          // #130 derivation result (null = no signal)
+            item._effectiveStatus = effective;      // what overlay was based on
+          }
+        }
       } catch { /* fail-soft */ }
     }));
     // Drift detection: log cards with sprint: ID in frontmatter SoT but missing
