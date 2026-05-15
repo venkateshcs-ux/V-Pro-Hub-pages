@@ -90,6 +90,15 @@ window.BacklogView = (() => {
     sessionTypes: [],
     sprints: [],
     activeSprint: null,    // { id, frontmatter, planItems, backlogMap, acMap, adaptations, dailyLog, sessions, health, drift }
+    // S058 post-close — empty-state diagnostics when loadActiveSprint() returns null.
+    // Set inside loadActiveSprint() to one of: 'no_active_row' | 'detail_file_missing' | 'detail_says_closed'.
+    noActiveSprintReason: null,
+    noActiveSprintCandidate: null,    // The SPRINTS.md row claiming active when detail file disagrees / missing
+    noActiveSprintDetailStatus: null, // The detail file's status when it disagrees with the index row
+    // D146/#120 — past sprint branches enumeration (closed status). Lazy-loaded on
+    // first 'Past' filter selection; cached for session duration.
+    pastSprintBranches: null,        // null = not loaded; [] = loaded empty; [...] = loaded with entries
+    pastSprintBranchesLoading: false,
     productFilter: 'All',
     sessionFilter: 'All',
     sprintFilter: 'All sprints',  // 'All sprints' | 'Current' | 'Past' | 'No sprint' | 'range'
@@ -187,25 +196,88 @@ window.BacklogView = (() => {
   // ── Active sprint loading (parsers ported from views/sprint.js) ──
 
   async function loadActiveSprint() {
-    // Read SPRINTS.md → find active. If none → null.
+    // #119 (S061) — Deterministic active-sprint discovery via branch enumeration.
+    // Primary path: enumerate sprint/Sprint-* branches via GitHub API + find the
+    // one whose SP-*.md frontmatter has `status: active`. Bypasses master-side
+    // SPRINTS.md staleness entirely (the D136 model keeps sprint files on
+    // sprint/Sprint-N until close; master may not have the current sprint file).
+    //
+    // The all-sprints index (SPRINTS.md on master) is still fetched for
+    // backwards-compat with downstream consumers reading `state.sprints` — but
+    // it is no longer the source of truth for "which sprint is active."
+
+    // Fetch SPRINTS.md (for state.sprints) — best-effort, never blocks active discovery
     let sprintsMd;
     try { sprintsMd = await Repos.getFile(CONFIG.username, state.backlogRepo, 'docs/SPRINTS.md'); }
-    catch { return null; }
-    if (!sprintsMd) return null;
-    const sprints = parseSprintsIndex(sprintsMd);
-    state.sprints = sprints;
-    const active = sprints.find(s => s.status === 'active');
-    if (!active) return null;
+    catch { sprintsMd = null; }
+    state.sprints = sprintsMd ? parseSprintsIndex(sprintsMd) : [];
 
-    // Filename convention per AGILE.md §1.2: SP-YYYY-MM-DD.md (ISO start date)
-    // Display ID is SP-DDMonYY which differs — use start date for the file lookup.
-    const filename = active.start ? `SP-${active.start}.md` : `${active.id}.md`;
+    // Module availability check
+    if (!window.ActiveSprint || typeof window.ActiveSprint.getActiveSprintBranch !== 'function') {
+      console.error('[backlog] window.ActiveSprint not loaded — active-sprint discovery unavailable');
+      state.noActiveSprintReason = 'active_sprint_module_unavailable';
+      return null;
+    }
+
+    // Discover active sprint via branch enumeration
+    let discovered;
+    try {
+      discovered = await window.ActiveSprint.getActiveSprintBranch(CONFIG.username, state.backlogRepo);
+    } catch (err) {
+      console.error('[backlog] ActiveSprint discovery threw:', err);
+      state.noActiveSprintReason = 'active_sprint_module_threw';
+      return null;
+    }
+
+    if (!discovered) {
+      // Propagate ActiveSprint's UX state — caller renders empty state with reason
+      const errType = window.ActiveSprint.lastError && window.ActiveSprint.lastError.type;
+      state.noActiveSprintReason = errType || 'unknown';
+      return null;
+    }
+
+    // Read the detail file FROM THE DISCOVERED BRANCH (not from master)
+    const filename = discovered.sprintFile;
+    const sprintBranchName = discovered.branch;
     let detailMd;
-    try { detailMd = await Repos.getFile(CONFIG.username, state.backlogRepo, `docs/sprints/${filename}`); }
-    catch { return null; }
-    if (!detailMd) return null;
+    try { detailMd = await Repos.getFile(CONFIG.username, state.backlogRepo, `docs/sprints/${filename}`, sprintBranchName); }
+    catch {
+      state.noActiveSprintReason = 'detail_file_missing';
+      return null;
+    }
+    if (!detailMd) {
+      state.noActiveSprintReason = 'detail_file_missing';
+      return null;
+    }
 
     const frontmatter = parseFrontmatter(detailMd);
+
+    // Synthesize `active` row if SPRINTS.md index doesn't have it (Sprint 4 case
+    // on master: branch-enumerated discovery succeeded but master SPRINTS.md
+    // doesn't carry the row yet). Backwards-compat with downstream renderers
+    // that expect an `active` meta object with {id, start, num, status}.
+    const fileStart = (filename.match(/^SP-(\d{4}-\d{2}-\d{2})\.md$/) || [])[1] || null;
+    const indexedSprint = state.sprints.find(s =>
+      (fileStart && s.start === fileStart) || s.id === filename.replace(/\.md$/, '')
+    );
+    const active = indexedSprint || {
+      id: fileStart ? `SP-${fileStart}` : filename.replace(/\.md$/, ''),
+      start: fileStart,
+      num: discovered.sprintNum,
+      status: 'active',
+      _synthesized: true,  // marker for debugging
+    };
+
+    // Cross-check (D141 dogfood): if ActiveSprint module returned this branch
+    // because it parsed status:active, the cross-check should be a no-op. Keep
+    // it anyway to guard against parser disagreement between the minimal parser
+    // in active-sprint.js and the full parser here.
+    const detailStatus = (frontmatter.status || '').toLowerCase();
+    if (detailStatus && detailStatus !== 'active') {
+      console.warn(`[backlog] ActiveSprint returned ${sprintBranchName} but full parse of ${filename} says status:${detailStatus} — parser disagreement; treating as not-active`);
+      state.noActiveSprintReason = 'parser_disagreement';
+      return null;
+    }
     const planItems   = parsePlanSection(detailMd);
     const adaptations = parseAdaptations(detailMd);
     const dailyLog    = parseDailyLog(detailMd);
@@ -214,12 +286,44 @@ window.BacklogView = (() => {
     // Per-sprint split-read (#85 schema): committed_items may include slug IDs
     // (e.g. "97-narrowed", "EXP-001") that aren't BACKLOG.md rows. Source-of-truth
     // for those is docs/backlog-detail/<slug>.md on the sprint branch. Fetch + synthesize.
-    const sprintBranch = frontmatter.branch || null;
+    // #119 (S061): use the branch we discovered via ActiveSprint, NOT frontmatter.branch.
+    // Both should match in practice (the SP file's frontmatter.branch points at the
+    // branch it lives on), but the discovered branch is canonical — it's the branch
+    // we just read this file from.
+    const sprintBranch = sprintBranchName;
+
+    // #122 (S061) — re-fetch BACKLOG.md from the active sprint branch so row
+    // updates committed to sprint/Sprint-N during the sprint are immediately
+    // visible in the UI without requiring mid-sprint master writes (D136 honored).
+    // The initial fetch in render() targets master (for backlogSha writeback
+    // path); we overlay with sprint-branch view here for display + filtering.
+    // Fail-soft: if the sprint-branch fetch errors, keep the master version.
+    try {
+      const branchBacklogMd = await Repos.getFile(CONFIG.username, state.backlogRepo, state.backlogPath, sprintBranch);
+      if (branchBacklogMd) {
+        const branchItems = parseBacklog(branchBacklogMd);
+        if (branchItems.length > 0) {
+          state.items = branchItems;
+          state.products = extractProducts(state.items);
+          state.sessionTypes = extractSessionTypes(state.items);
+        }
+      }
+    } catch { /* fail-soft — keep master-version state.items */ }
+
     const committedRaw = (frontmatter.committed_items || []).map(String);
     const existingIds = new Set(state.items.map(i => String(i.id)));
     const missingSlugs = committedRaw.filter(c => !existingIds.has(c));
+    const STATUS_MAP = {
+      'in-progress': 'In Progress ▶',
+      'done': 'Done ✓',
+      'blocked': '⏸ Blocked',
+      'open': 'Open',
+      'candidate': 'Not started',
+      'planning': 'Not started',
+      'closed': 'Done ✓',
+      'needs-reverification': 'Not started',
+    };
     if (missingSlugs.length && sprintBranch) {
-      const STATUS_MAP = { 'in-progress': 'In Progress ▶', 'done': 'Done ✓', 'blocked': '⏸ Blocked', 'open': 'Open' };
       const synthesized = await Promise.all(missingSlugs.map(async slug => {
         try {
           const md = await Repos.getFile(CONFIG.username, state.backlogRepo, `docs/backlog-detail/${slug.toLowerCase()}.md`, sprintBranch);
@@ -239,6 +343,30 @@ window.BacklogView = (() => {
         } catch { return null; }
       }));
       for (const it of synthesized) if (it) state.items.push(it);
+    }
+
+    // S061/#119 — Per-card status overlay (D141 canonical SoT per item).
+    // BACKLOG.md row Status column is denormalized + lags behind per-card status
+    // flips (Venkatesh-flagged drift at S057). Per D141, the per-card detail file
+    // frontmatter `status:` is the granular SoT. Overlay it onto state.items for
+    // every committed ID so the kanban + tile counters reflect actual per-card
+    // status, not the stale BACKLOG row text.
+    const presentInBacklog = committedRaw.filter(c => existingIds.has(c));
+    if (presentInBacklog.length && sprintBranch) {
+      await Promise.all(presentInBacklog.map(async id => {
+        try {
+          const md = await Repos.getFile(CONFIG.username, state.backlogRepo, `docs/backlog-detail/${String(id).toLowerCase()}.md`, sprintBranch);
+          if (!md) return;
+          const fm = parseFrontmatter(md);
+          if (!fm.status) return;
+          const overlay = STATUS_MAP[fm.status] || fm.status;
+          const item = state.items.find(it => String(it.id) === String(id));
+          if (item) {
+            item.status = overlay;
+            item._cardStatus = fm.status;  // marker for debugging
+          }
+        } catch { /* fail-soft — keep BACKLOG row Status */ }
+      }));
     }
 
     // Keyed by string id so both numeric ("85") and slug ("97-narrowed") IDs resolve
@@ -268,11 +396,78 @@ window.BacklogView = (() => {
     };
   }
 
+  // D146/#120 — Lazy-load closed sprint branches for the Past filter panel.
+  // First-load is a 1 + 2N API-call burst (N = number of closed sprint branches).
+  // Cached in state.pastSprintBranches for the session lifetime.
+  async function loadPastSprintBranches() {
+    if (!window.ActiveSprint || typeof window.ActiveSprint.listAllSprintBranches !== 'function') {
+      console.warn('[backlog] ActiveSprint.listAllSprintBranches unavailable; cannot load past sprints');
+      state.pastSprintBranches = [];
+      return;
+    }
+    state.pastSprintBranchesLoading = true;
+    try {
+      const buckets = await window.ActiveSprint.listAllSprintBranches(CONFIG.username, state.backlogRepo);
+      // Sort newest-first by sprint number (listAllSprintBranches already does this within each bucket)
+      state.pastSprintBranches = (buckets && buckets.closed) ? buckets.closed : [];
+    } catch (err) {
+      console.error('[backlog] loadPastSprintBranches failed:', err);
+      state.pastSprintBranches = [];
+    } finally {
+      state.pastSprintBranchesLoading = false;
+    }
+  }
+
   function parseFrontmatter(md) {
     const match = md.match(/^---\r?\n([\s\S]*?)\r?\n---/);
     if (!match) return {};
     const result = {};
-    for (const line of match[1].split('\n')) {
+    const lines = match[1].split('\n');
+
+    // S061/#119 — YAML block-list-of-objects support (committed_items[], bg_carries[],
+    // mid_sprint_adds[], swaps[], etc. per D144 sprint frontmatter schema). Detected by
+    // a top-level key whose value-line is empty AND whose next non-blank line begins
+    // with two-space indent + dash (`  -`). For each such block, collect the inner
+    // `id:` values and emit a flat array at the parent key (preserves the legacy
+    // consumer shape: `(frontmatter.committed_items || []).map(String)`). Other fields
+    // inside each dash-bullet (slot, layer, title, etc.) are discarded — consumers
+    // that need them should fetch the full card per-id.
+    const blockListIds = {};  // parent_key → [id1, id2, ...]
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const m = line.match(/^([\w_]+):\s*$/);  // top-level key with empty value
+      if (!m) continue;
+      const parentKey = m[1];
+      // Peek next non-blank, non-comment line. Must start with "  - " to be a block list.
+      let j = i + 1;
+      while (j < lines.length && /^\s*(#.*)?$/.test(lines[j])) j++;
+      if (j >= lines.length || !/^\s{2}-\s/.test(lines[j])) continue;
+      const ids = [];
+      while (j < lines.length) {
+        const li = lines[j];
+        if (/^\S/.test(li)) break;  // top-level key reached → end of block list
+        if (/^\s*$/.test(li)) { j++; continue; }
+        if (/^\s*#/.test(li)) { j++; continue; }
+        // `  - id: "80"` or `  - id: 80` form
+        const idm = li.match(/^\s{2}-\s+id:\s*["']?([^"'#\s]+)["']?/);
+        if (idm) {
+          ids.push(idm[1]);
+          j++;
+          continue;
+        }
+        // Inner property of current bullet (further-indented `    key: value`) — skip
+        j++;
+      }
+      if (ids.length > 0) {
+        blockListIds[parentKey] = ids;
+      } else {
+        // Block list existed but had no `id:` fields (e.g. swaps[] of plain objects).
+        // Emit empty array so consumers can iterate safely.
+        blockListIds[parentKey] = [];
+      }
+    }
+
+    for (const line of lines) {
       const m = line.match(/^([\w_]+):\s*(.*)/);
       if (!m) continue;
       const key = m[1];
@@ -304,6 +499,11 @@ window.BacklogView = (() => {
         continue;
       }
       result[key] = raw.replace(/^["']|["']$/g, '');
+    }
+    // Overlay block-list IDs (S061/#119): override null/string entries for keys that
+    // parsed as block-lists-of-objects with the extracted id[] array.
+    for (const [k, ids] of Object.entries(blockListIds)) {
+      result[k] = ids;
     }
     return result;
   }
@@ -403,17 +603,36 @@ window.BacklogView = (() => {
   }
 
   function sessionsFromDailyLog(dailyLog) {
+    // S061/#119 — One entry per day header (was: one per `- **` bullet, which
+    // produced N rows per day with empty sessionId, all rendering identical day
+    // headers as their `date` field). New shape: each Day-block yields a single
+    // session entry keyed by the first `S\d+` token in the day header. Bullets
+    // from inside that day become the entry's body.
     const out = [];
     for (const day of dailyLog) {
+      // Extract session ID(s) + a short date range from the day-header text.
+      // Header shape: `Day N — Sun 2026-05-09 → Mon 2026-05-10 — S058 <focus...>`
+      const idMatches = day.date.match(/S\d+(?:-\w+)?/g) || [];
+      const sessionId = idMatches[0] || '';
+      // Pull the ISO date range (e.g. "2026-05-09 → 2026-05-10") for display.
+      const dateRange = (day.date.match(/\d{4}-\d{2}-\d{2}(?:\s*[→\-]\s*\d{4}-\d{2}-\d{2})?/) || [''])[0];
+      // Focus = the post-`Sxxx`-token tail of the day header, trimmed to ~80 chars.
+      const focusMatch = day.date.match(/S\d+[-\w]*\s+(.+?)(?:\s*\(refs|$)/);
+      const focus = focusMatch ? focusMatch[1].trim().slice(0, 80) : day.date.slice(0, 80);
+      // Collect bullets across all `- **<...>**` entries in the day, capped.
+      const allBullets = [];
       for (const e of day.entries) {
-        const focus = (e.header.match(/focus:\s*([^·]+)/) || [,''])[1].trim();
-        const tag   = (e.header.match(/tag:\s*([\w-]+)/) || [,''])[1].trim();
-        out.push({
-          id: e.sessionId, date: day.date, focus, tag,
-          body: e.bullets.slice(0, 4),
-          more: Math.max(0, e.bullets.length - 4),
-        });
+        allBullets.push(e.header);
+        for (const b of e.bullets) allBullets.push(b);
       }
+      out.push({
+        id: sessionId,
+        date: dateRange || day.date.slice(0, 40),
+        focus,
+        tag: '',
+        body: allBullets.slice(0, 4),
+        more: Math.max(0, allBullets.length - 4),
+      });
     }
     return out;
   }
@@ -480,9 +699,9 @@ window.BacklogView = (() => {
   function computeHealthMetrics(fm, planItems, backlogMap, adaptations, dailyLog) {
     const committed = (fm.committed_items || []).map(String);
     const todayIso = new Date().toISOString().split('T')[0];
-    const start = fm.start || todayIso;
+    const start = fm.start_date || fm.start || todayIso;  // S061/#119 — start_date is canonical per AGILE §1.2
     const dayOfSprint = Math.max(1, Math.round((new Date(todayIso) - new Date(start)) / 86400000) + 1);
-    const totalDays = fm.length_days || 7;
+    const totalDays = parseInt(fm.cadence) || fm.length_days || 7;
 
     const cols = committed.map(id => statusToColumn((backlogMap[id] || {}).status || ''));
     const total = cols.length;
@@ -587,8 +806,10 @@ window.BacklogView = (() => {
       const inCurrent = committedSet.has(String(i.id));
       if (state.sprintFilter === 'Current' && !inCurrent) return false;
       if (state.sprintFilter === 'No sprint' && inCurrent) return false;
-      // 'Past' / 'range' would need sprint-history tracking — for v1, treat as 'All sprints'
-      // (these filter values render but currently don't exclude further; future #NEW)
+      // 'Past' filter under D146/#120: items in this view are still all-items;
+      // the historical snapshots live as separate per-closed-branch panels rendered
+      // alongside (see renderPastSprintsPanel below). Future card: clicking a past
+      // sprint drills into that branch's snapshot.
 
       // S037ext Track E — Summary tile filters (priority + status)
       if (!opts.skipTileFilters) {
@@ -619,9 +840,13 @@ window.BacklogView = (() => {
   // ── Render: header, search, summary ────────────
 
   function renderHeader() {
+    // #119 (S061): heading reflects current view context. When sprintFilter='Current'
+    // (the Sprint Dashboard preset entered via #/sprint route), show "Sprint Dashboard"
+    // to match the surface the user invoked.
+    const title = state.sprintFilter === 'Current' ? 'Sprint Dashboard' : 'Backlog';
     return `<div class="bl-vh">
       <div>
-        <div class="bl-vh-title">Backlog<span class="bl-save-indicator" aria-hidden="true"></span></div>
+        <div class="bl-vh-title">${title}<span class="bl-save-indicator" aria-hidden="true"></span></div>
         <div class="bl-vh-sub">${state.items.length} items</div>
       </div>
     </div>`;
@@ -734,10 +959,29 @@ window.BacklogView = (() => {
   function renderSprintBand() {
     const s = state.activeSprint;
     if (!s) {
+      // S058 post-close: surface why no active sprint rendered so the empty
+      // state is actionable (e.g. index drift caught by detail-file cross-check).
+      const reason = state.noActiveSprintReason;
+      const lastClosed = (state.sprints || []).filter(sp => sp.status === 'closed')
+        .reduce((a, b) => (b.num > (a?.num || 0) ? b : a), null);
+      let msg = 'No active sprint.';
+      let detail = 'Open a sprint via Sprint Planning ceremony.';
+      if (reason === 'detail_says_closed' && state.noActiveSprintCandidate) {
+        const cand = state.noActiveSprintCandidate;
+        msg = `No active sprint — index row drift detected.`;
+        detail = `SPRINTS.md marks ${cand.id} as active, but its detail file says status:${state.noActiveSprintDetailStatus}. Flip the SPRINTS.md row to ${state.noActiveSprintDetailStatus} and add the next sprint row.`;
+      } else if (reason === 'detail_file_missing' && state.noActiveSprintCandidate) {
+        const cand = state.noActiveSprintCandidate;
+        msg = `Active sprint detail file missing.`;
+        detail = `SPRINTS.md marks ${cand.id} as active, but docs/sprints/SP-${cand.start}.md was not found on the default branch. Commit the sprint detail file or correct the row.`;
+      } else if (lastClosed) {
+        msg = `No active sprint.`;
+        detail = `Last closed sprint was ${lastClosed.id}. Run the Sprint OPEN ceremony to create the next sprint.`;
+      }
       return `<div class="bl-empty">
         <div class="bl-empty-glyph">∅</div>
-        <div class="bl-empty-msg">No active sprint.</div>
-        <div class="bl-empty-detail">Open a sprint via Sprint Planning ceremony.</div>
+        <div class="bl-empty-msg">${escHtml(msg)}</div>
+        <div class="bl-empty-detail">${escHtml(detail)}</div>
       </div>`;
     }
     const fm = s.frontmatter;
@@ -745,8 +989,11 @@ window.BacklogView = (() => {
     const delivered = s.health.find(h => h.key === 'delivery').display.split('/')[0] || 0;
     const pct = total > 0 ? Math.round(delivered / total * 100) : 0;
     const todayIso = new Date().toISOString().split('T')[0];
-    const dayOfSprint = Math.max(1, Math.round((new Date(todayIso) - new Date(fm.start || todayIso)) / 86400000) + 1);
-    const totalDays = fm.length_days || 7;
+    // S061/#119 — frontmatter field is `start_date` per AGILE §1.2 + D144 schema.
+    // Pre-#119 code used `fm.start` which was undefined → Day always rendered as 1.
+    const startIso = fm.start_date || fm.start || todayIso;
+    const dayOfSprint = Math.max(1, Math.round((new Date(todayIso) - new Date(startIso)) / 86400000) + 1);
+    const totalDays = parseInt(fm.cadence) || fm.length_days || 7;
 
     const healthHtml = s.health.map(m => {
       const cls = m.band === 'green' ? 'hp-green' : m.band === 'amber' ? 'hp-amber'
@@ -993,6 +1240,8 @@ window.BacklogView = (() => {
     const showSprintCtx = state.sprintFilter === 'Current' && state.activeSprint;
     // #90 — board view available across all sprint filters (S037ext); previously gated to Current+activeSprint
     const showKanban    = state.vmMode === 'board';
+    // D146/#120 — show past-sprints panel when 'Past' filter selected
+    const showPastSprints = state.sprintFilter === 'Past';
 
     container.innerHTML = `
       ${isReadOnly() ? renderReadOnlyBanner() : ''}
@@ -1001,10 +1250,57 @@ window.BacklogView = (() => {
       ${renderFilterArea()}
       ${renderSummary(tileBase)}
       ${showSprintCtx ? renderSprintBand() : ''}
+      ${showPastSprints ? renderPastSprintsPanel() : ''}
       <div id="bl-main-canvas">${showKanban ? renderKanban(items) : renderItemsList(items)}</div>
       ${showSprintCtx ? renderAuxPanels() : ''}
     `;
     wireEvents(container);
+  }
+
+  // D146/#120 — past-sprints panel
+  function renderPastSprintsPanel() {
+    if (state.pastSprintBranchesLoading) {
+      return `<div class="bl-past-panel bl-past-panel-loading">
+        <div class="bl-past-panel-title">Past Sprints</div>
+        <div class="bl-past-panel-sub muted">Loading closed sprint branches…</div>
+      </div>`;
+    }
+    if (state.pastSprintBranches === null) {
+      return `<div class="bl-past-panel">
+        <div class="bl-past-panel-title">Past Sprints</div>
+        <div class="bl-past-panel-sub muted">Click 'Past' again to load.</div>
+      </div>`;
+    }
+    if (state.pastSprintBranches.length === 0) {
+      return `<div class="bl-past-panel bl-past-panel-empty">
+        <div class="bl-past-panel-title">Past Sprints</div>
+        <div class="bl-past-panel-sub muted">No closed sprint branches found.</div>
+      </div>`;
+    }
+    const rows = state.pastSprintBranches.map(s => {
+      const fm = s.frontmatter || {};
+      const goalConf = fm.goal_confidence_close ?? '—';
+      const commitPct = fm.commit_actual_pct ?? '—';
+      const startDate = fm.start_date || '—';
+      const endDate   = fm.end_date   || '—';
+      return `<div class="bl-past-row" data-branch="${escAttr(s.branch)}">
+        <div class="bl-past-row-head">
+          <span class="bl-past-num">Sprint ${s.sprintNum}</span>
+          <span class="bl-past-id field-mono">${escHtml(fm.id || s.sprintFile.replace(/\.md$/, ''))}</span>
+          <span class="bl-past-branch field-mono muted">${escHtml(s.branch)}</span>
+        </div>
+        <div class="bl-past-row-meta muted">
+          ${escHtml(startDate)} → ${escHtml(endDate)} ·
+          goal-conf: ${escHtml(String(goalConf))} ·
+          commit %: ${escHtml(String(commitPct))}
+        </div>
+      </div>`;
+    }).join('');
+    return `<div class="bl-past-panel">
+      <div class="bl-past-panel-title">Past Sprints <span class="bl-past-panel-count">${state.pastSprintBranches.length}</span></div>
+      <div class="bl-past-panel-sub muted">Read from sprint/Sprint-N closed branches via ActiveSprint enumeration. Branch-level snapshots; drill-in interaction queued (future card).</div>
+      <div class="bl-past-list">${rows}</div>
+    </div>`;
   }
 
   // Update only the main canvas (faster than full render for filter changes)
@@ -1055,6 +1351,10 @@ window.BacklogView = (() => {
         // S037ext #90 — don't force list mode when leaving Current; board now works for any filter.
         // Only auto-flip TO board on entering Current (and only if user hasn't manually overridden).
         if (state.sprintFilter === 'Current' && !state.vmManual) state.vmMode = 'board';
+        // D146/#120 — lazy-load closed sprint branches when 'Past' is first selected
+        if (state.sprintFilter === 'Past' && state.pastSprintBranches === null && !state.pastSprintBranchesLoading) {
+          loadPastSprintBranches().then(() => fullRender(container));
+        }
         fullRender(container);
       });
     });
@@ -1579,5 +1879,7 @@ window.BacklogView = (() => {
     }
   }
 
-  return { render };
+  // S061/#119 debug-only accessor — exposes internal state for preview_eval introspection.
+  // Safe to keep: read-only reference; consumers may snapshot via JSON.stringify.
+  return { render, _debugState: () => state };
 })();
