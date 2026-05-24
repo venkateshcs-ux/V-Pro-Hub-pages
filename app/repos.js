@@ -133,21 +133,21 @@ const Repos = (() => {
 
 
   /** Get file content + sha (for SHA-guarded writeback) — routes by owner */
-  async function getFileWithSha(owner, repo, path) {
+  async function getFileWithSha(owner, repo, path, branch) {
     const adapter = _adapterFor(owner);
     if (typeof adapter.getFileWithSha !== 'function') {
       throw new Error(`Adapter for ${owner} does not support getFileWithSha (writeback)`);
     }
-    return adapter.getFileWithSha(owner, repo, path);
+    return adapter.getFileWithSha(owner, repo, path, branch);
   }
 
   /** PUT file content — routes by owner. Throws 409-equivalent on SHA conflict. */
-  async function putFile(owner, repo, path, content, sha, message) {
+  async function putFile(owner, repo, path, content, sha, message, branch) {
     const adapter = _adapterFor(owner);
     if (typeof adapter.putFile !== 'function') {
       throw new Error(`Adapter for ${owner} does not support putFile (writeback)`);
     }
-    return adapter.putFile(owner, repo, path, content, sha, message);
+    return adapter.putFile(owner, repo, path, content, sha, message, branch);
   }
 
   /** Get rate limit from the primary provider */

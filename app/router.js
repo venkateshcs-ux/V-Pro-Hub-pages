@@ -15,6 +15,7 @@ const ROUTES = {
   architecture: { label: 'Architecture', icon: '◇', built: true, step: '#19', desc: 'Multi-provider architecture', viewModule: 'ArchitectureView' },
   investment: { label: 'AI Investment', icon: '◆', built: true, step: '#29', desc: 'Plan costs, tool ranking, break-even', viewModule: 'InvestmentView' },
   settings:  { label: 'Settings',       icon: '◌', built: true,  step: 'C7',  desc: 'PAT, preferences, intervals', viewModule: 'SettingsView'  },
+  card:      { label: 'Card Detail',    icon: '◎', built: true,  step: '#136', desc: 'Backlog card detail page — todos / DCs / sessions / dependencies', viewModule: 'CardView' },
 };
 
 const DEFAULT_ROUTE = 'backlog';

@@ -107,10 +107,11 @@ class GitHubAdapter {
   }
 
 
-  /** Get file content + sha (for SHA-guarded writeback) */
-  async getFileWithSha(owner, repo, path) {
+  /** Get file content + sha (for SHA-guarded writeback). Optional branch for sprint files. */
+  async getFileWithSha(owner, repo, path, branch) {
+    const refSuffix = branch ? `?ref=${encodeURIComponent(branch)}` : '';
     try {
-      const data = await this._request(`/repos/${owner}/${repo}/contents/${path}`);
+      const data = await this._request(`/repos/${owner}/${repo}/contents/${path}${refSuffix}`);
       if (data.encoding === 'base64') {
         return {
           content: GitHubAdapter._decodeBase64Utf8(data.content.replace(/\n/g, '')),
@@ -125,13 +126,13 @@ class GitHubAdapter {
   }
 
   /** PUT file content (Contents API) — requires sha for updates; omit for new files.
-      Throws on 409 SHA conflict (someone else edited). */
-  async putFile(owner, repo, path, content, sha, message) {
+      Throws on 409 SHA conflict (someone else edited). Optional branch (default: master). */
+  async putFile(owner, repo, path, content, sha, message, branch) {
     const url = `${this._base}/repos/${owner}/${repo}/contents/${path}`;
     const body = {
       message: message || `Update ${path}`,
       content: btoa(unescape(encodeURIComponent(content))),  // utf-8 → base64
-      branch: 'master',
+      branch: branch || 'master',
     };
     if (sha) body.sha = sha;
 

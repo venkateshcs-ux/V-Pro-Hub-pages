@@ -559,6 +559,14 @@ window.BacklogView = (() => {
           j++;
           continue;
         }
+        // `  - Design` form — simple string bullet (no key:value; e.g. process_steps[])
+        const simpleStart = li.match(/^\s{2}-\s+(\S.*)$/);
+        if (simpleStart) {
+          if (cur) bullets.push(cur);
+          cur = { _value: simpleStart[1].trim() };
+          j++;
+          continue;
+        }
         // `    status: done` form — INNER property of current bullet
         const inner = li.match(/^\s{4,}([\w_]+):\s*(.*)$/);
         if (inner && cur) {
@@ -614,10 +622,13 @@ window.BacklogView = (() => {
     //   emit FLAT ID array (preserves the existing consumer contract per S061).
     // - Object-shape keys (todos / done_criteria / team): emit ARRAY OF OBJECTS so
     //   consumers like deriveCardStatus() can read nested sub-fields (S068/#130).
-    const OBJECT_SHAPE_KEYS = new Set(['todos', 'done_criteria', 'team']);
+    const OBJECT_SHAPE_KEYS = new Set(['todos', 'done_criteria', 'team', 'feature_requirements', 'nfr']);
+    const STRING_LIST_KEYS  = new Set(['process_steps']);
     for (const [k, bullets] of Object.entries(blockListFull)) {
       if (OBJECT_SHAPE_KEYS.has(k)) {
         result[k] = bullets;  // [{id, status, text, ...}, ...]
+      } else if (STRING_LIST_KEYS.has(k)) {
+        result[k] = bullets.map(b => b._value || b.id).filter(Boolean);  // plain strings
       } else {
         result[k] = bullets.map(b => b.id).filter(id => id != null);  // flat IDs (legacy)
       }
@@ -1781,6 +1792,10 @@ window.BacklogView = (() => {
 
     // Kanban card drag
     container.querySelectorAll('.kanban-card').forEach(card => {
+      card.addEventListener('click', () => {
+        if (_drag.id) return;  // suppress click when drag just ended
+        navigate('card', card.dataset.id);
+      });
       card.addEventListener('dragstart', e => {
         _drag = { id: card.dataset.id, kind: 'card' };
         e.dataTransfer.effectAllowed = 'move';
@@ -2013,5 +2028,5 @@ window.BacklogView = (() => {
 
   // S061/#119 debug-only accessor — exposes internal state for preview_eval introspection.
   // Safe to keep: read-only reference; consumers may snapshot via JSON.stringify.
-  return { render, _debugState: () => state };
+  return { render, _debugState: () => state, parseFrontmatter, deriveCardStatus, sessionsFromCards };
 })();

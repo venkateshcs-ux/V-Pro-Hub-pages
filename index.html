@@ -3697,7 +3697,7 @@
     .bl-toast-action:hover { background: var(--accent-soft-bg); }
 
     /* Kanban card additions — savedot, dragging, rail (priority) */
-    .kanban-card { position: relative; cursor: grab; }
+    .kanban-card { position: relative; cursor: pointer; }
     .kanban-card:active { cursor: grabbing; }
     .kanban-card.dragging { opacity: 0.5; transform: rotate(2deg); }
     .kanban-card.flying { box-shadow: var(--shadow-accent-strong); transform: rotate(2deg); }
@@ -4361,6 +4361,73 @@
       .proj-step-body { padding: 0 12px 12px 12px; }
     }
 
+    /* ─── Card Detail View (#136) ───────────────────────────────────── */
+    .proj-card-id { font-family: 'JetBrains Mono', monospace; font-size: 13px; color: var(--accent); font-weight: 700; margin-right: 8px; }
+    .cs-badge { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 600; letter-spacing: 0.02em; border: 1px solid var(--border); background: var(--surface); color: var(--text-dim); }
+    .cs-done        { background: var(--success-soft-bg, var(--surface)); color: var(--success-soft-fg, var(--text)); border-color: var(--success-soft-bd, var(--border)); }
+    .cs-in-progress { background: var(--accent-soft-bg, var(--surface)); color: var(--accent); border-color: var(--accent); }
+    .cs-blocked     { background: var(--warning-soft-bg, var(--surface)); color: var(--warning-soft-fg, var(--text)); border-color: var(--warning-soft-bd, var(--border)); }
+    .cs-priority { font-size: 11px; padding: 2px 7px; border-radius: 4px; font-weight: 600; margin-right: 6px; background: var(--surface); color: var(--text-dim); border: 1px solid var(--border); }
+    .cs-priority.rail-high { background: var(--danger-soft-bg, var(--surface)); color: var(--danger-soft-fg, var(--text)); border-color: var(--danger-soft-bd, var(--border)); }
+    .cs-priority.rail-med  { background: var(--warning-soft-bg, var(--surface)); color: var(--warning-soft-fg, var(--text)); border-color: var(--warning-soft-bd, var(--border)); }
+    .cs-carry-tag { font-size: 10px; padding: 2px 6px; border-radius: 4px; background: var(--surface); color: var(--text-dim); border: 1px dashed var(--border); margin-left: 6px; }
+    .proj-h-sub { font-size: 12.5px; color: var(--text-dim); margin: 4px 0 0; }
+    /* Todos */
+    .cs-todo-list { display: flex; flex-direction: column; gap: 2px; }
+    .cs-todo-row { display: flex; align-items: flex-start; gap: 8px; padding: 6px 0; border-bottom: 1px dashed var(--border-light, var(--border)); }
+    .cs-todo-row:last-child { border-bottom: 0; }
+    .cs-todo-row-done .cs-todo-label { color: var(--text-dim); text-decoration: line-through; }
+    .cs-todo-cb { flex: 0 0 20px; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; border-radius: 4px; border: 1px solid var(--border); background: var(--surface); cursor: pointer; font-size: 12px; line-height: 1; padding: 0; color: var(--text-dim); transition: background 0.15s, color 0.15s; }
+    .cs-todo-cb:not([disabled]):hover { border-color: var(--accent); color: var(--accent); }
+    .cs-todo-done { background: var(--success-soft-bg, var(--surface)); border-color: var(--success-soft-bd, var(--border)); color: var(--success-soft-fg, var(--text)); }
+    .cs-todo-blocked { background: var(--warning-soft-bg, var(--surface)); border-color: var(--warning-soft-bd, var(--border)); color: var(--warning-soft-fg, var(--text)); }
+    .cs-todo-label { flex: 1 1 auto; font-size: 13px; color: var(--text); line-height: 1.45; min-width: 0; }
+    .cs-todo-status-tag { flex: 0 0 auto; font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; margin-top: 3px; }
+    /* Done Criteria */
+    .cs-dc-list { display: flex; flex-direction: column; gap: 2px; }
+    .cs-dc-row { display: flex; align-items: flex-start; gap: 8px; padding: 6px 0; border-bottom: 1px dashed var(--border-light, var(--border)); font-size: 13px; }
+    .cs-dc-row:last-child { border-bottom: 0; }
+    .cs-dc-icon { flex: 0 0 16px; color: var(--text-dim); font-size: 13px; margin-top: 1px; }
+    .cs-dc-met .cs-dc-icon { color: var(--success-soft-fg, var(--text)); }
+    .cs-dc-text { flex: 1 1 auto; color: var(--text); line-height: 1.45; min-width: 0; }
+    .cs-dc-met .cs-dc-text { color: var(--text-dim); }
+    .cs-dc-tag { flex: 0 0 auto; font-size: 10px; padding: 1px 5px; border-radius: 3px; text-transform: uppercase; letter-spacing: 0.04em; margin-top: 2px; }
+    .cs-tag-met  { background: var(--success-soft-bg, var(--surface)); color: var(--success-soft-fg, var(--text)); }
+    .cs-tag-open { background: var(--surface); color: var(--text-dim); border: 1px solid var(--border); }
+    /* Feature Requirements */
+    .cs-fr-list { display: flex; flex-direction: column; gap: 2px; }
+    .cs-fr-row { display: flex; align-items: flex-start; gap: 8px; padding: 6px 0; border-bottom: 1px dashed var(--border-light, var(--border)); font-size: 13px; }
+    .cs-fr-row:last-child { border-bottom: 0; }
+    .cs-fr-id { flex: 0 0 36px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--accent); font-weight: 700; margin-top: 2px; }
+    .cs-fr-pri { flex: 0 0 auto; font-size: 10px; padding: 1px 5px; border-radius: 3px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); background: var(--surface); border: 1px solid var(--border); white-space: nowrap; margin-top: 2px; }
+    .cs-fr-pri.must-have { background: var(--danger-soft-bg, var(--surface)); color: var(--danger-soft-fg, var(--text)); border-color: var(--danger-soft-bd, var(--border)); }
+    .cs-fr-text { flex: 1 1 auto; color: var(--text); line-height: 1.45; min-width: 0; }
+    /* NFR */
+    .cs-nfr-list { display: flex; flex-direction: column; gap: 2px; }
+    .cs-nfr-row { display: grid; grid-template-columns: 90px 1fr; gap: 8px; padding: 6px 0; border-bottom: 1px dashed var(--border-light, var(--border)); font-size: 12.5px; }
+    .cs-nfr-row:last-child { border-bottom: 0; }
+    .cs-nfr-dim { font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); font-weight: 600; margin-top: 1px; }
+    .cs-nfr-req { color: var(--text); line-height: 1.45; min-width: 0; }
+    /* Process Steps */
+    .cs-steps { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+    .cs-step { font-size: 12px; padding: 3px 10px; border-radius: 4px; background: var(--surface); border: 1px solid var(--border); color: var(--text); }
+    .cs-step-sep { color: var(--text-dim); font-size: 10px; }
+    /* Dependencies */
+    .cs-deps { display: flex; flex-wrap: wrap; gap: 8px; }
+    .cs-dep-link { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--accent); text-decoration: none; padding: 3px 8px; border-radius: 4px; border: 1px solid var(--accent); cursor: pointer; }
+    .cs-dep-link:hover { background: var(--accent); color: var(--bg); }
+    /* Team */
+    .cs-auth-badge { font-size: 10px; padding: 1px 5px; border-radius: 3px; background: var(--surface); color: var(--text-dim); border: 1px solid var(--border); text-transform: uppercase; letter-spacing: 0.04em; }
+    /* Sessions */
+    .cs-no-sessions { font-size: 12.5px; color: var(--text-dim); font-style: italic; }
+    .cs-session-row { display: flex; align-items: baseline; gap: 8px; padding: 5px 0; border-bottom: 1px dashed var(--border-light, var(--border)); font-size: 12.5px; }
+    .cs-session-row:last-child { border-bottom: 0; }
+    .cs-session-id { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--accent); flex: 0 0 auto; }
+    .cs-session-meta { color: var(--text-dim); font-size: 11px; flex: 0 0 auto; }
+    .cs-session-title { color: var(--text); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* Error */
+    .proj-error { padding: 24px; color: var(--danger-soft-fg, var(--text)); background: var(--danger-soft-bg, var(--surface)); border: 1px solid var(--danger-soft-bd, var(--border)); border-radius: 8px; margin: 24px; }
+
     /* ─── End Project Surface ────────────────────────────────────────── */
 
   </style>
@@ -4533,11 +4600,11 @@
     window.mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' });
   }
 </script>
-<script src="app/providers/github.js?v=S067-129"></script>
+<script src="app/providers/github.js?v=S075a"></script>
 <script src="app/providers/bitbucket.js"></script>
-<script src="app/repos.js?v=S067-129"></script>
+<script src="app/repos.js?v=S075a"></script>
 <script src="app/active-sprint.js?v=S067-129"></script>
-<script src="app/router.js?v=S056a"></script>
+<script src="app/router.js?v=S075a"></script>
 <script src="app/dashboard.js?v=S035"></script>
 <script src="views/sprint.js?v=S061"></script>
 <script src="views/orchestrator.js?v=S037f"></script>
@@ -4545,8 +4612,9 @@
 <script src="views/product.js?v=C10"></script>
 <script src="views/session.js?v=C10"></script>
 <script src="views/context.js?v=C10"></script>
-<script src="views/backlog.js?v=S068-130b"></script>
+<script src="views/backlog.js?v=S075a"></script>
 <script src="views/project.js?v=S038b"></script>
+<script src="views/card.js?v=S075a"></script>
 <script src="views/health.js?v=C12"></script>
 <script src="views/ai-collab-guide.js?v=S056b"></script>
 <script src="views/architecture.js?v=S07"></script>
