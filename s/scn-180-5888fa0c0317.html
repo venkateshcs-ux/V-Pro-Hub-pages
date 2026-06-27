@@ -1,0 +1,91 @@
+<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Scenario Status — protected</title>
+<style>
+:root{--bd:#e2e2e6;--dim:#666;--acc:#2b6cb0}
+*{box-sizing:border-box}body{font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;margin:0;color:#1a1a1a;background:#f6f7fb}
+#gate{max-width:420px;margin:14vh auto;background:#fff;border:1px solid var(--bd);border-radius:12px;padding:28px;text-align:center}
+#gate h2{margin:0 0 6px;font-size:18px}#gate p{color:var(--dim);font-size:13px;margin:0 0 18px}
+#pw{width:100%;padding:10px 12px;font-size:15px;border:1px solid var(--bd);border-radius:8px;margin-bottom:10px}
+#unlock{width:100%;padding:10px;font-size:15px;font-weight:600;color:#fff;background:var(--acc);border:0;border-radius:8px;cursor:pointer}
+#err{color:#c0392b;font-size:13px;min-height:18px;margin-top:8px}
+#content{display:none;max-width:1180px;margin:0 auto;padding:18px 20px}
+.hdr h1{font-size:20px;margin:6px 0}.sub{color:var(--dim);font-size:12.5px}
+.tiles{display:flex;flex-wrap:wrap;align-items:center;gap:18px;margin:12px 0;padding:10px 14px;background:#fff;border:1px solid var(--bd);border-radius:8px}
+.tile{text-align:center;min-width:46px}.tn{font-family:ui-monospace,monospace;font-size:20px;font-weight:700;line-height:1.1}.tl{font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);margin-top:2px}
+.t-fail .tn{color:#8b1a1a}.t-gap .tn{color:#555}.t-pass .tn{color:#186029}
+.bar{position:relative;flex:1 1 140px;min-width:120px;height:18px;background:#eef0f4;border:1px solid var(--bd);border-radius:999px;overflow:hidden}
+.bf{height:100%;background:#d4f4dd;border-right:1px solid #bfe6c8}.bl{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;font-family:ui-monospace,monospace}
+.pp{border:1px solid #f0d9a8;background:#fff8e8;border-radius:8px;padding:10px 14px;margin:0 0 12px}.ppt{font-weight:700;font-size:13px;margin-bottom:6px}
+.ppr{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:5px 0;border-top:1px dashed var(--bd);font-size:12.5px}.ppk{font-size:10px;font-weight:700;text-transform:uppercase;padding:1px 7px;border-radius:3px;background:#f0f1f5;border:1px solid var(--bd)}.ppb{font-size:11px;color:var(--dim)}.ppn{font-size:11px;color:var(--dim);margin-top:6px}
+.note{font-size:12px;color:var(--dim);margin-bottom:12px}
+.tw{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:12.5px;background:#fff}
+th{position:sticky;top:0;background:#f0f1f5;text-align:left;padding:7px 9px;font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--dim);border-bottom:1px solid var(--bd)}
+td{padding:7px 9px;border-bottom:1px dashed var(--bd);vertical-align:top}
+.grp td{background:#eef0f4;font-weight:700;text-transform:uppercase;font-size:10px;letter-spacing:.04em}.grp .ct{color:var(--dim)}
+.id{font-family:ui-monospace,monospace;color:var(--acc);font-weight:700;white-space:nowrap}
+td.c{text-align:center;white-space:nowrap}.b{font-size:10px;font-weight:700;padding:1px 7px;border-radius:3px;text-transform:uppercase;white-space:nowrap}.na{color:#999}
+.ig{font-size:9px;color:var(--dim);margin-top:2px}.rm{font-size:11px;color:#8b1a1a;margin-top:3px}
+.ev{white-space:nowrap;font-family:ui-monospace,monospace;font-size:10px;color:var(--dim)}.wn{color:#999}
+.pri{font-size:10px;font-weight:700;padding:1px 6px;border-radius:3px;border:1px solid var(--bd);white-space:nowrap}
+.pri-must-have{background:#fbd5d5;color:#8b1a1a}.pri-normal{background:#e6effa;color:#2b6cb0}.pri-nice-to-have{color:var(--dim)}
+.tw table tbody tr:not(.det):not(.grp){cursor:pointer}
+.tw table tbody tr:not(.det):not(.grp):hover{background:#f6f7fb}
+.ex{background:none;border:0;cursor:pointer;font-size:11px;color:var(--dim);padding:0 2px;margin-right:2px}.ex:hover{color:var(--acc)}
+.det>td{background:#f6f7fb;padding:0;border-bottom:2px solid var(--bd)}
+.trX{padding:12px 16px}.trX-h{font-size:12px;font-weight:700;margin-bottom:8px}.trX-src{font-size:10px;font-weight:400;color:var(--dim);margin-left:6px}
+.trX-e2e{font-size:12px;color:var(--dim);margin-bottom:10px}.trX-none{font-size:12px;color:var(--dim);font-style:italic}
+.trX-tbl{width:100%;border-collapse:collapse;font-size:12px;background:#fff;border:1px solid var(--bd);border-radius:6px}
+.trX-tbl th{text-align:left;padding:6px 9px;font-size:9px;text-transform:uppercase;letter-spacing:.04em;color:var(--dim);border-bottom:1px solid var(--bd)}
+.trX-tbl td{padding:6px 9px;border-bottom:1px dashed var(--bd);vertical-align:top}.trX-tbl tr:last-child td{border-bottom:0}
+.trX-n{width:28px;font-family:ui-monospace,monospace;color:var(--dim)}.trX-exp{width:44%}.trX-act{color:#8b1a1a}.trX-st{width:78px;white-space:nowrap}
+.trX-chip{display:inline-block;font-size:10px;font-weight:600;color:#7d5a00;background:#fff8e8;border:1px solid #f0d9a8;border-radius:3px;padding:1px 6px;margin-top:3px}
+.lyr-stack{display:flex;flex-direction:column;align-items:center;gap:3px;min-width:78px}
+.lyr-src{font-size:9px;color:var(--dim);font-family:ui-monospace,monospace;white-space:nowrap;max-width:100px;overflow:hidden;text-overflow:ellipsis}
+.lyr-when{font-size:9px;color:var(--dim);font-family:ui-monospace,monospace}
+.conflict{font-size:9px;color:#8b1a1a;font-weight:600;white-space:nowrap;max-width:140px;overflow:hidden;text-overflow:ellipsis}
+.ts{margin:0 0 12px;border:1px solid var(--bd);border-radius:8px;background:#fff}
+.ts-summary{padding:8px 12px;font-size:13px;font-weight:600;cursor:pointer;user-select:none;display:flex;align-items:center;gap:8px}
+.ts-summary .ct{font-family:ui-monospace,monospace;font-size:10px;color:var(--dim);background:#f0f1f5;border:1px solid var(--bd);border-radius:999px;padding:0 7px}
+.ts-hint{font-size:11px;font-weight:400;color:var(--dim)}
+.ts-body{padding:4px 12px 10px;display:flex;flex-direction:column;gap:4px}
+.ts-row{display:flex;align-items:center;gap:10px;padding:4px 0;border-top:1px dashed var(--bd);font-size:12.5px}
+.ts-row:first-child{border-top:0}.ts-ic{font-size:13px;width:18px;text-align:center}
+.ts-sid{font-family:ui-monospace,monospace;font-size:10.5px;color:var(--acc);font-weight:700;min-width:165px}
+.ts-name{flex:1 1 auto}.ts .pending{font-style:italic}
+.foot{font-size:11px;color:var(--dim);margin-top:16px;text-align:center}
+</style></head><body>
+<div id="gate">
+  <h2>🔒 Scenario Status</h2>
+  <p>Heraizen HSM · protected page. Enter the password shared with your team.</p>
+  <input id="pw" type="password" placeholder="Password" autofocus onkeydown="if(event.key==='Enter')unlock()">
+  <button id="unlock" onclick="unlock()">Unlock</button>
+  <div id="err"></div>
+</div>
+<div id="content"></div>
+<script>
+const P={"s":"VJMXGOM+PWs0oMLpYcpR4A==","iv":"IrRvt9/EeE6sPVLl","d":"aOkKfwGZYQ5xjL9wTzJRDg/GQiTZgWs3Ud9Nv6Y4OB5iEdLw0bwQinGjsxFuGG9G26q+j6wx7RrHlTBVa5IRjtJaatz9fPuDaz+MVk9iw62mUHiXxDJYOQ1WcXHwZwKqYRLjfZq3Lfs/JtEQeNtOfZuYsiI1ddrHR6QOZCBjpj1BFcMDsj9yrsYzqWu6HDs2gqeVAxr+R4CfBC6JGHtTXTse+ANZi6g7LETIGZAhZTDsBzjaIUhwBcXnq9ySHYrTOYur27x65Pk0g6TA/+jcmvSb/9+JX4xN1+H9ghAyGd/xqIJ7eEUgXIYeQHhbDDIRjqLfI2/HyMzQsWRpmlw0m6HAMxJtuW4bk/zbRnYYGyhTucmUJVCgOwlo4/rMCc0GQ6xleGlF8qBCMYuPrw6DD8SBkVMAp2cSI4OvvW5c+z8bHLpu2UiJIdSrhkAZ9qKehRV7v9Bc5OcCIVOIE+UDA4hWbKhPwuyDqryAXH5CnMr97WMo4NxyLXBAqc3ZZbtBHr3dY18fPA+f6h0V+UfZI+nmi60iujRvrLuNRaboiFvWuS19A3vUr5CISdOE07x1TgOOKMa9ZMto42TfInIP9WJUJ/T0LLW458hD8Bc6frLMsa3ijrtif7tS7ohPl9+i6SDCpLF/69Y7ZhbHQOeJSZ1Ri8g7hyvdEY8k7kKWJOPkT7rXCHXa4WSn9q7NZNX2X37sU2pNaiNcnOcosiUZ3G94ohrU4ASnmfLZe3mJRNIVorns+cW2DnP8BCHktS+LiGvpxRWem9Qaetqy+WBX468mdZ6aNaaLmJT4Ke5wlfOr/JqQYvOWAi3Hu2Vz9mO6CwCcbKFVq5+PbbuIMJeiSYd82N13AEF7W936DwYpNNGHZcuyyoHGAHnQ87uRgXYNReqKpA8YGSDx6xblU1/QX7qwUh08gNDX4J4TrsWpNpVPzApCXKNowqy/wqEqIb1d+IgnB1FGGk6DcIP0sMNe1Tqeu5bAnYxvJ42CaKFao03hk4idLpwgTWXQU/hKArmMfuv6IjGjbf9m+KOkSejipXKKKbm85vjAUp0iL8dcx3YpPrEAEvMXFsJtwPw88YeEe/5F58O0xmnNjvjiAsX66KhYfRbEACbhtcIFasr1sSSslMkMYlKhAILeUgqT+2pPIbusf7MwcmwhP2/C9HMlPlVohFSGksjTg7RVNeDmVqD1FmdB95F/oGYZmex6c1Q/U1UrXcnW4d++ZpxiPUcrgC53NeLgkcfSiMxbVsnkKRy848ZF0JIfHCBIfAOoHhsCJsui9z8kQfDJyFLiLjKMUiyWsDKQ6tkFR0pq0CfRXwxiJ5sry5lN96y2Xf3412fnM77zyI6Hu1s7Le9uJz6QhNMNZxGAJMuZO0ozO2Wu4vV3wT14Kg1Ty0qicVp2ltKinvd5EL2PhPDbgGIT4G12Obc1eYSRMoKxMm93U77qasYNHGBqE4Rcn50xN/ii0yD16b93nUdWMMPBFLp5Cis+jEqRV3WG7LDvUpOBWEtB+1hkgDHXFXtDiLaip8D0PKZRra5ZdPpWpinsC+OUG/EvOhlE8RMsFZGz556WW48GefNlJGfwjnqewgLstQCjwjPsQkhcB4x/NCTZW5b+w0+pCp77tQvg7k+wlFUlUMHngEVmU6MWAyRUz405u6OBquYe/9HXBxKRc17C5XSisJLCWfZT39SduvlWkD3owjOfkGjOWtlVY463h8QLa9/VLe9PnX7ZWoYqxcwdL5S+JW5EEVWGYLC5BRhJ4fcUKJN/TcBcQq+3ONthxnk=","n":200000};
+const b64=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
+async function unlock(){
+  const err=document.getElementById('err');err.textContent='';
+  try{
+    const km=await crypto.subtle.importKey('raw',new TextEncoder().encode(document.getElementById('pw').value),'PBKDF2',false,['deriveKey']);
+    const key=await crypto.subtle.deriveKey({name:'PBKDF2',salt:b64(P.s),iterations:P.n,hash:'SHA-256'},km,{name:'AES-GCM',length:256},false,['decrypt']);
+    const pt=await crypto.subtle.decrypt({name:'AES-GCM',iv:b64(P.iv)},key,b64(P.d));
+    document.getElementById('content').innerHTML=new TextDecoder().decode(pt)+'<div class="foot">Read-only snapshot · regenerated by regression-suite/build_shareable_page.js · propose changes via your team channel.</div>';
+    document.getElementById('gate').style.display='none';
+    document.getElementById('content').style.display='block';
+    // Row-clickable drill-down: any click on a scenario row toggles its detail.
+    // Skip clicks on interactive controls (none today on the shared page, but future-proof).
+    document.getElementById('content').addEventListener('click',function(ev){
+      if(ev.target.closest('button, select, input, textarea, a, label')) return;
+      var tr=ev.target.closest('tr'); if(!tr || tr.classList.contains('det') || tr.classList.contains('grp')) return;
+      var b=tr.querySelector('button.ex'); if(!b) return;
+      var d=document.querySelector('tr.det[data-detail="'+CSS.escape(b.dataset.exp)+'"]');
+      if(!d) return;
+      if(d.hasAttribute('hidden')){ d.removeAttribute('hidden'); b.textContent='▾'; } else { d.setAttribute('hidden',''); b.textContent='▸'; }
+    });
+  }catch(e){err.textContent='Wrong password — try again.';}
+}
+</script></body></html>
