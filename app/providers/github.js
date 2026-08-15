@@ -24,8 +24,8 @@ class GitHubAdapter {
     return h;
   }
 
-  async _request(path) {
-    const res = await fetch(`${this._base}${path}`, { headers: this._headers() });
+  async _request(path, opts = {}) {
+    const res = await fetch(`${this._base}${path}`, { headers: this._headers(), ...opts });
 
     if (res.status === 401) throw new Error('GitHub 401 — PAT invalid or expired');
     if (res.status === 403) throw new Error('GitHub 403 — rate limit or insufficient scopes');
@@ -92,7 +92,9 @@ class GitHubAdapter {
   async getFile(owner, repo, path, branch) {
     const refSuffix = branch ? `?ref=${encodeURIComponent(branch)}` : '';
     try {
-      const data = await this._request(`/repos/${owner}/${repo}/contents/${path}${refSuffix}`);
+      // no-store: render the LIVE file, never a browser-cached GitHub API response (stale
+      // reads silently dropped content / showed old data). Mirrors the getFileWithSha fix.
+      const data = await this._request(`/repos/${owner}/${repo}/contents/${path}${refSuffix}`, { cache: 'no-store' });
       if (data.encoding === 'base64') {
         return GitHubAdapter._decodeBase64Utf8(data.content.replace(/\n/g, ''));
       }
@@ -111,7 +113,9 @@ class GitHubAdapter {
   async getFileWithSha(owner, repo, path, branch) {
     const refSuffix = branch ? `?ref=${encodeURIComponent(branch)}` : '';
     try {
-      const data = await this._request(`/repos/${owner}/${repo}/contents/${path}${refSuffix}`);
+      // no-store: the SHA used to guard a writeback PUT must be the live HEAD, never a
+      // browser-cached GET (stale SHA → false 409 conflict). Read path (getFile) stays cached.
+      const data = await this._request(`/repos/${owner}/${repo}/contents/${path}${refSuffix}`, { cache: 'no-store' });
       if (data.encoding === 'base64') {
         return {
           content: GitHubAdapter._decodeBase64Utf8(data.content.replace(/\n/g, '')),

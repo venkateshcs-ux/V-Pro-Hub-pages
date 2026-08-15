@@ -832,10 +832,55 @@ window.ProjectView = (() => {
           ${renderAttachments()}
         </div>
       </div>
+      ${renderDeliveryTopology()}
       ${note}
     `;
     wireEvents(container);
   }
+
+  // #203 / #215 — embedded project surfaces (isolated iframes).
+  //
+  // #203 shipped exactly one surface, with both the filename and the section heading
+  // hardcoded. #215 generalises that to a registry: a project renders whichever of
+  // these files it carries, under its own heading. Adding a surface is a row here plus
+  // the file in projects/<id>/ — no further code change.
+  const EMBED_SURFACES = [
+    { file: 'delivery-topology.html', title: 'Delivery Topology', height: 760 },
+    { file: 'doc-system-gate.html',   title: 'Doc-System Gate',   height: 900 },
+  ];
+
+  function renderEmbeddedSurfaces() {
+    const loaded = state.embeds || {};
+    return EMBED_SURFACES
+      .filter(s => loaded[s.file])
+      .map(s => {
+        const src = escHtml(loaded[s.file]);
+        const srcHref = `https://github.com/${escHtml(CONFIG.username)}/V-Pro-Hub/blob/master/projects/${escHtml(state.projectId)}/${escHtml(s.file)}`;
+        return `
+      <section class="proj-topology" style="margin-top:18px">
+        <div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:8px">
+          <h2 style="font-size:15px;font-weight:800;margin:0;color:var(--text)">${escHtml(s.title)}</h2>
+          <a class="proj-link" href="${srcHref}" target="_blank" rel="noopener" style="font-size:12px;color:var(--text-muted);text-decoration:none">source ↗</a>
+        </div>
+        <iframe title="${escHtml(s.title)}" loading="lazy" sandbox="allow-scripts" srcdoc="${src}"
+          style="width:100%;height:${s.height}px;border:1px solid var(--border,#e1e7ef);border-radius:12px;background:#fff"></iframe>
+      </section>`;
+      })
+      .join('');
+  }
+
+  // Fetch every registered surface for this project; absent ones resolve to null.
+  async function loadEmbeddedSurfaces(branch) {
+    const found = {};
+    await Promise.all(EMBED_SURFACES.map(async s => {
+      found[s.file] = await Repos.getFile(state.owner, state.repo,
+        `projects/${state.projectId}/${s.file}`, branch).catch(() => null);
+    }));
+    return found;
+  }
+
+  // Back-compat alias — call sites from #203 still reference this name.
+  function renderDeliveryTopology() { return renderEmbeddedSurfaces(); }
 
   // ── Event wiring ───────────────────────────────
 
@@ -1159,6 +1204,7 @@ window.ProjectView = (() => {
           </div>
         </div>
       </div>
+      ${renderDeliveryTopology()}
       <div class="proj-mvp-note">
         <span class="proj-mvp-tag">_FEED.md only</span>
         This project doesn't have a structured <code>state.md</code> surface yet (project-not-product or nontech-initiative class per GR9). To enable the full Layer B canvas with todo/sub-item writeback, bootstrap a <code>state.md</code> from the Vhalli template at <code>projects/vhalli/state.md</code>. Source: <a class="proj-link" href="${feedGhUrl}" target="_blank" rel="noopener">projects/${escHtml(id)}/_FEED.md</a>.
@@ -1182,32 +1228,67 @@ window.ProjectView = (() => {
       state.statePath = `projects/${state.projectId}/state.md`;
       const feedPath  = `projects/${state.projectId}/_FEED.md`;
 
-      // Try state.md first (full Layer B surface with writeback)
+      // #151 (S095) — sibling of #122. Project files (state.md / _FEED.md) live on
+      // the active sprint branch under D136 (sprint-branch-as-SoT). Reading from
+      // master shows stale content (or "Could not load" when the file is
+      // sprint-only). Use the same ActiveSprint discovery pattern as views/backlog.js.
+      let sprintBranch = null;
+      if (window.ActiveSprint && typeof window.ActiveSprint.getActiveSprintBranch === 'function') {
+        try {
+          const discovered = await window.ActiveSprint.getActiveSprintBranch(state.owner, state.repo);
+          if (discovered && discovered.branch) sprintBranch = discovered.branch;
+        } catch (err) {
+          console.warn('[ProjectView] ActiveSprint discovery failed; falling back to default branch', err);
+        }
+      }
+
+      // Try state.md first (full Layer B surface with writeback).
+      // Writeback (getFileWithSha) still targets the active sprint branch when discovered;
+      // putFile must use the same branch (caller responsibility — see save handlers above).
       const stateResult = (typeof Repos.getFileWithSha === 'function')
-        ? await Repos.getFileWithSha(state.owner, state.repo, state.statePath).catch(() => null)
+        ? await Repos.getFileWithSha(state.owner, state.repo, state.statePath, sprintBranch).catch(() => null)
         : null;
       const stateMd = stateResult ? stateResult.content
-        : await Repos.getFile(state.owner, state.repo, state.statePath).catch(() => null);
+        : await Repos.getFile(state.owner, state.repo, state.statePath, sprintBranch).catch(() => null);
 
       if (stateMd) {
         state.stateRaw = stateMd;
         state.stateSha = stateResult ? stateResult.sha : null;
+        state.sprintBranch = sprintBranch;
         state.project  = parseStateMd(stateMd);
+        // #203 / #215 — embed every registered surface this project carries.
+        state.embeds = await loadEmbeddedSurfaces(sprintBranch);
         renderProject(container);
         return;
       }
 
-      // Fallback: try _FEED.md (read-only minimal surface)
-      const feedMd = await Repos.getFile(state.owner, state.repo, feedPath).catch(() => null);
+      // Fallback: try _FEED.md (read-only minimal surface) on the active sprint branch.
+      const feedMd = await Repos.getFile(state.owner, state.repo, feedPath, sprintBranch).catch(() => null);
       if (feedMd) {
         state.feedRaw = feedMd;
+        state.sprintBranch = sprintBranch;
         state.feed    = parseFeed(feedMd);
+        // #203 / #215 — embedded surfaces render on the _FEED path too.
+        state.embeds = await loadEmbeddedSurfaces(sprintBranch);
         renderFeedSurface(container);
         return;
       }
 
+      // Neither exists on the sprint branch — last-ditch retry on default branch
+      // for projects that were never sprint-branch-scoped (defensive only).
+      if (sprintBranch) {
+        const masterFeed = await Repos.getFile(state.owner, state.repo, feedPath).catch(() => null);
+        if (masterFeed) {
+          state.feedRaw = masterFeed;
+          state.sprintBranch = null;
+          state.feed = parseFeed(masterFeed);
+          renderFeedSurface(container);
+          return;
+        }
+      }
+
       // Neither exists
-      container.innerHTML = renderError({ message: `Neither state.md nor _FEED.md found for projects/${state.projectId}/` });
+      container.innerHTML = renderError({ message: `Neither state.md nor _FEED.md found for projects/${state.projectId}/ (checked ${sprintBranch || 'default'} branch)` });
 
     } catch (e) {
       console.error('[ProjectView] render error', e);

@@ -16,6 +16,9 @@ const ROUTES = {
   investment: { label: 'AI Investment', icon: '◆', built: true, step: '#29', desc: 'Plan costs, tool ranking, break-even', viewModule: 'InvestmentView' },
   settings:  { label: 'Settings',       icon: '◌', built: true,  step: 'C7',  desc: 'PAT, preferences, intervals', viewModule: 'SettingsView'  },
   card:      { label: 'Card Detail',    icon: '◎', built: true,  step: '#136', desc: 'Backlog card detail page — todos / DCs / sessions / dependencies', viewModule: 'CardView' },
+  epic:      { label: 'Epic Detail',    icon: '◈', built: true,  step: '#144', desc: 'Epic detail — cards grouped by sprint + features', viewModule: 'EpicView' },
+  feature:   { label: 'Feature Detail', icon: '◉', built: true,  step: '#144', desc: 'Feature detail — cards grouped by sprint + epics', viewModule: 'FeatureView' },
+  scenarios: { label: 'Scenario Suite', icon: '✓', built: true,  step: '#170', desc: 'End User Scenario Status — Heraizen HSM Lite regression smoke suite (pass id, e.g. #/scenarios/170)', viewModule: 'ScenariosView' },
 };
 
 const DEFAULT_ROUTE = 'backlog';
@@ -32,6 +35,26 @@ function getRoute() {
   };
 }
 
+// S120 IA Phase 2b — breadcrumb (Portfolio › Product › view). Token-styled inline.
+function buildBreadcrumb(routeKey, param, route) {
+  const L = (href, label) => `<a href="${href}" style="font-family:var(--font-ui);font-size:13px;font-weight:500;color:var(--text-muted);text-decoration:none;cursor:pointer" onmouseover="this.style.color='var(--accent)'" onmouseout="this.style.color='var(--text-muted)'">${label}</a>`;
+  const S = `<span style="color:var(--text-dim);font-size:13px;margin:0 7px">›</span>`;
+  const C = (label) => `<span style="font-family:var(--font-ui);font-size:13px;font-weight:600;color:var(--text)">${label}</span>`;
+  const tc = (s) => s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+  if (routeKey === 'portfolio') return C('Portfolio');
+  if (routeKey === 'product' && param) {
+    const [pid, ...sub] = param.split('/');
+    const subKey = sub[0] || '';
+    const subLabel = subKey === 'backlog' ? 'Backlog' : (subKey ? tc(subKey) : '');
+    if (subLabel) return [L('#/portfolio', 'Portfolio'), S, L(`#/product/${pid}/backlog`, tc(pid)), S, C(subLabel)].join('');
+    return [L('#/portfolio', 'Portfolio'), S, C(tc(pid))].join('');
+  }
+  if (routeKey === 'backlog') return C('Backlog');
+  if ((routeKey === 'epic' || routeKey === 'feature' || routeKey === 'card') && param)
+    return [L('#/backlog', 'Backlog'), S, C(param)].join('');
+  return C(param ? `${route.label} — ${param}` : route.label);
+}
+
 function renderView(routeKey, param) {
   const route = ROUTES[routeKey];
   const main  = document.getElementById('main-content');
@@ -43,9 +66,9 @@ function renderView(routeKey, param) {
     if (isActive && route.built) el.classList.remove('unbuilt');
   });
 
-  // Update page title
+  // Update breadcrumb (S120 IA Phase 2b — replaces the flat page-title)
   const pageTitle = document.getElementById('page-title');
-  if (pageTitle) pageTitle.textContent = param ? `${route.label} — ${param}` : route.label;
+  if (pageTitle) pageTitle.innerHTML = buildBreadcrumb(routeKey, param, route);
 
   if (route.built) {
     const viewModule = window[route.viewModule];

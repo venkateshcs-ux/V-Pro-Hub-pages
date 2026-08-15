@@ -76,36 +76,79 @@ window.CardView = (() => {
       fm.session_class   && { label: 'Class',     value: fm.session_class },
     ].filter(Boolean);
 
+    const editBtn = isReadOnly() ? '' :
+      `<button class="cs-edit-btn" id="cs-edit-btn" title="Open edit form in Backlog view">✎ Edit</button>`;
     return `<div class="proj-header">
       <div class="proj-h-row">
         <div>
           <span class="proj-card-id">#${escHtml(String(fm.id ?? ''))}</span>
           ${priority ? `<span class="cs-priority ${priorityCls}">${escHtml(priority)}</span>` : ''}
           ${statusBadge(status)}
+          ${fm.work_type ? `<span class="cs-worktype wt-${escHtml(String(fm.work_type))}" title="work_type (D156 infomodel v2.2)">${escHtml(String(fm.work_type))}</span>` : ''}
           ${carryTag}
           <h1 class="proj-h-title" style="margin-top:8px">${escHtml(fm.title || fm.name || String(fm.id ?? ''))}</h1>
           ${fm.scope ? `<p class="proj-h-sub">${escHtml(fm.scope)}</p>` : ''}
         </div>
+        ${editBtn}
       </div>
       ${facts.length ? `<div class="proj-facts-strip">${facts.map(f =>
         `<div class="proj-fact"><div class="proj-fact-label">${escHtml(f.label)}</div><div class="proj-fact-value">${escHtml(f.value)}</div></div>`
       ).join('')}</div>` : ''}
+      ${renderTouches(fm)}
     </div>`;
+  }
+
+  // D156 / #207 t3 — touches[] impact links (many-to-many; HOME drives rollups,
+  // these chips are traversal-only). Reverse "touched-by" views need a card
+  // index — remaining #144 scope.
+  function renderTouches(fm) {
+    const touches = Array.isArray(fm.touches) ? fm.touches : [];
+    if (!touches.length) return '';
+    const chips = touches.map(t => {
+      const id = escHtml(String(t).trim());
+      const route = id.startsWith('F-') ? `#/feature/${id}` : `#/epic/${id}`;
+      return `<a href="${route}" class="cs-touch-chip" title="impact link (touches — D156)">${id}</a>`;
+    }).join(' ');
+    return `<div class="cs-touches"><span class="cs-touches-label">TOUCHES</span> ${chips}</div>`;
+  }
+
+  // #177 — deterministic blocked_on resolution (mirror of validate_card_schema.py contract).
+  // An intra-card todo ref (tN) is resolved iff that todo's status == done; rb-* / cross-card /
+  // external-marker refs are treated unresolved (single-card view, conservative). Returns the
+  // subset of refs that are still unresolved.
+  function unresolvedBlockedOn(t, todoStatusById) {
+    const bo = Array.isArray(t.blocked_on) ? t.blocked_on : [];
+    return bo.map(r => String(r).trim()).filter(ref => {
+      if (Object.prototype.hasOwnProperty.call(todoStatusById, ref)) {
+        return todoStatusById[ref] !== 'done';   // intra-card → resolved when done
+      }
+      return true;  // rb-* / cross-card / external → unresolved
+    });
   }
 
   function renderTodos(todos, ro) {
     if (!todos || todos.length === 0) return '';
+    const todoStatusById = {};
+    todos.forEach(t => { if (t && t.id != null) todoStatusById[String(t.id)] = String(t.status || '').toLowerCase(); });
     const rows = todos.map(t => {
-      const statusLo = String(t.status || '').toLowerCase();
-      const done     = statusLo === 'done';
-      const blocked  = statusLo === 'blocked';
+      const storedLo = String(t.status || '').toLowerCase();
+      // #177 auto-derive: if blocked_on has unresolved refs, display as blocked regardless
+      // of the stored status (don't trust manual assertion). Validator enforces the same rule
+      // at commit-time; this makes the UI honest even before a commit runs.
+      const unresolved = unresolvedBlockedOn(t, todoStatusById);
+      const derivedBlocked = unresolved.length > 0 && storedLo !== 'done';
+      const done     = storedLo === 'done';
+      const blocked  = derivedBlocked || storedLo === 'blocked';
       const iconCls  = done ? 'cs-todo-done' : blocked ? 'cs-todo-blocked' : '';
       const icon     = done ? '✓' : blocked ? '⏸' : '○';
-      const label    = t.status || 'open';
+      const label    = done ? 'done' : (blocked ? 'blocked' : (t.status || 'open'));
       const cbAttr   = ro ? 'disabled aria-disabled="true"' : `data-todo-id="${escHtml(t.id)}"`;
+      const blockedChip = unresolved.length > 0
+        ? `<span class="cs-todo-blocked-by" title="Deterministically blocked until these resolve (#177)">Blocked by: ${unresolved.map(escHtml).join(', ')}</span>`
+        : '';
       return `<div class="cs-todo-row${done ? ' cs-todo-row-done' : ''}">
         <button class="cs-todo-cb ${iconCls}" ${cbAttr} title="${escHtml(label)}" aria-label="${done ? 'Mark open' : 'Mark done'}: ${escHtml(t.text || '')}">${icon}</button>
-        <span class="cs-todo-label">${inline(t.text || '')}</span>
+        <span class="cs-todo-label">${inline(t.text || '')}${blockedChip}</span>
         <span class="cs-todo-status-tag" aria-label="Status: ${escHtml(label)}">${escHtml(label)}</span>
       </div>`;
     }).join('');
@@ -155,6 +198,42 @@ window.CardView = (() => {
     return `<div class="proj-card">
       <div class="proj-card-title">Process</div>
       <div class="cs-steps" role="list">${items}</div>
+    </div>`;
+  }
+
+  // #170 t5 — End User Scenario Status (compact summary + link to the dedicated suite page).
+  // The full journey-grouped catalog lives on its own independently-developable page at
+  // #/scenarios/<cardId> (views/scenarios.js). The card shows only an at-a-glance summary
+  // strip + "View full suite →" link so the detail page stays scannable.
+  function renderEndUserScenariosSummary(scenarios, cardId) {
+    if (!scenarios || scenarios.length === 0) return '';
+    const norm  = s => String(s || '').toLowerCase();
+    const total = scenarios.length;
+    const by     = pred => scenarios.filter(pred).length;
+    const ovFail = by(s => norm(s.status_overall) === 'fail');
+    const ovGap  = by(s => norm(s.status_overall) === 'gap');
+    const apiPass = by(s => norm(s.status_api) === 'pass');
+    const apiFail = by(s => norm(s.status_api) === 'fail');
+    const uiFail = by(s => norm(s.status_ui) === 'fail');
+    const must   = by(s => norm(s.priority) === 'must-have');
+    const normal = by(s => norm(s.priority) === 'normal');
+    const nice   = by(s => norm(s.priority) === 'nice-to-have');
+    const apiPct = total ? Math.round((apiPass / total) * 100) : 0;
+    return `<div class="proj-card eus-card eus-summary-card">
+      <div class="proj-card-title">End User Scenario Status
+        <span class="proj-card-count">${total}</span>
+        <span class="eus-subtitle">Heraizen HSM · Lite regression smoke suite</span>
+      </div>
+      <div class="eus-summary">
+        <div class="eus-stat"><div class="eus-stat-n">${total}</div><div class="eus-stat-l">scenarios</div></div>
+        <div class="eus-stat eus-s-fail"><div class="eus-stat-n">${ovFail}</div><div class="eus-stat-l">overall fail</div></div>
+        <div class="eus-stat eus-s-gap"><div class="eus-stat-n">${ovGap}</div><div class="eus-stat-l">overall gap</div></div>
+        <div class="eus-stat"><div class="eus-stat-n">${apiPass}/${apiFail}</div><div class="eus-stat-l">API ✓ / ✗</div></div>
+        <div class="eus-stat"><div class="eus-stat-n">${uiFail}</div><div class="eus-stat-l">UI ✗ (manual)</div></div>
+        <div class="eus-stat"><div class="eus-stat-n">${must}/${normal}/${nice}</div><div class="eus-stat-l">must / norm / nice</div></div>
+        <div class="eus-bar" title="${apiPct}% API pass"><div class="eus-bar-fill" style="width:${apiPct}%"></div><span class="eus-bar-lbl">${apiPct}% API pass</span></div>
+      </div>
+      <a class="eus-viewall" href="#/scenarios/${escHtml(String(cardId))}">View full suite → <span class="eus-viewall-sub">${total} scenarios · ${ovFail} failing · per-layer UI/API/3P + source</span></a>
     </div>`;
   }
 
@@ -235,6 +314,7 @@ window.CardView = (() => {
     const ro     = isReadOnly();
     container.innerHTML = `
       ${renderHeader(fm, status)}
+      ${renderEndUserScenariosSummary(fm.end_user_scenarios, state.cardId)}
       <div class="proj-grid">
         <div class="proj-main">
           ${renderTodos(fm.todos, ro)}
@@ -327,6 +407,16 @@ window.CardView = (() => {
         navigate('card', a.dataset.dep);
       });
     });
+    // #134 — Edit button: navigate to backlog + open edit modal for this card
+    const editBtnEl = container.querySelector('#cs-edit-btn');
+    if (editBtnEl) {
+      editBtnEl.addEventListener('click', () => {
+        const mc = document.getElementById('main-content');
+        if (mc && window.BacklogView && typeof window.BacklogView.openEditFor === 'function') {
+          window.BacklogView.openEditFor(mc, state.cardId);
+        }
+      });
+    }
   }
 
   // ── Public render ───────────────────────────────

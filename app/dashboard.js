@@ -92,11 +92,58 @@ const Dashboard = (() => {
 
 })();
 
+// #185 t9 — sync-state pill. Shows nothing in deployed mode (Repos.getSyncState()
+// resolves null there — no local adapter, no sync-state concept). On localhost,
+// renders synced / local-ahead / dirty and stays live via Repos.onChange.
+const SyncStatePill = (() => {
+  const dom = {
+    pill:  () => document.getElementById('sync-pill'),
+    dot:   () => document.getElementById('sync-dot'),
+    label: () => document.getElementById('sync-label'),
+  };
+
+  const LABELS = {
+    synced:      'synced',
+    'local-ahead': 'local, unpushed',
+    dirty:       'uncommitted',
+  };
+
+  function render(syncState) {
+    const pill = dom.pill();
+    const dot  = dom.dot();
+    const lbl  = dom.label();
+    if (!pill || !dot || !lbl) return;
+
+    if (!syncState || !syncState.syncState) {
+      pill.classList.remove('visible');
+      return;
+    }
+
+    pill.classList.add('visible');
+    dot.className = 'sync-dot ' + syncState.syncState;
+    lbl.textContent = LABELS[syncState.syncState] || syncState.syncState;
+  }
+
+  async function init() {
+    if (typeof Repos === 'undefined' || typeof Repos.getSyncState !== 'function') return;
+
+    const initial = await Repos.getSyncState();
+    render(initial);
+
+    if (typeof Repos.onChange === 'function') {
+      Repos.onChange((state) => render(state));
+    }
+  }
+
+  return { init };
+})();
+
 // Auto-init on DOM ready
 document.addEventListener('DOMContentLoaded', () => {
   Dashboard.init();
   SessionTimer.init();
   UpgradePill.init();
+  SyncStatePill.init();
 });
 
 // ── Session timer ──────────────────────────────

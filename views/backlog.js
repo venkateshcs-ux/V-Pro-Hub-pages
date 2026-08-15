@@ -10,6 +10,11 @@ window.BacklogView = (() => {
   function escHtml(s) {
     return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
+  // escHtml already escapes " → &quot;, so it is safe for double-quoted attributes too.
+  // Defined as an alias because renderPastSprintsPanel() (#120) and the #188 cadence
+  // modal both reference escAttr(); without this the Past filter and the cadence modal
+  // throw "escAttr is not defined" at render time.
+  function escAttr(s) { return escHtml(s); }
 
   function inline(text) {
     return escHtml(text)
@@ -57,6 +62,7 @@ window.BacklogView = (() => {
   // ── Global save indicator (P3 #18) ─────────────
 
   let _savesInFlight = 0;
+  let _pendingEditId = null; // set by openEditFor when BacklogView not yet rendered; cleared on next fullRender
   function saveStart() {
     _savesInFlight++;
     document.body.setAttribute('data-saves-in-flight', '');
@@ -84,6 +90,11 @@ window.BacklogView = (() => {
 
   // ── Module state ───────────────────────────────
 
+  // #185 t5 — single active Repos.onChange subscription; render() unsubscribes
+  // the previous one (if any) before resubscribing, so navigating away/back
+  // or repeated render() calls never leak more than one interval.
+  let _unsubscribeOnChange = null;
+
   const state = {
     items: [],
     products: [],
@@ -104,6 +115,8 @@ window.BacklogView = (() => {
     sprintFilter: 'All sprints',  // 'All sprints' | 'Current' | 'Past' | 'No sprint' | 'range'
     rangeStart: null,
     rangeEnd: null,
+    // #187 (D152) — tier filter: 'All tiers' | 'Comfortable goal' | 'Stretch lounge' | 'Cold storage'
+    tierFilter: 'All tiers',
     searchQuery: '',
     vmMode: 'list',            // 'list' | 'board'
     vmManual: false,
@@ -114,6 +127,9 @@ window.BacklogView = (() => {
     // S037ext Track E — summary-tile-driven filters (click tile to toggle)
     priorityFilter: null,      // null | 'high' | 'medium' | 'low'
     statusFilter: null,        // null | 'open' | 'done'
+    crudModal: null,           // null | { mode:'create'|'edit', item, todos, todosLoading, saving, errorMsg, _escHandler }
+    cadenceModal: null,        // #188 — null | { loading, raw, sha, start, end, cad, history[], saving, errorMsg, _escHandler }
+    coverageRegistry: {},      // #192 — { cardId: [testId,…] } loaded via CoverageRegistry; {} = empty (badge off, DoD)
   };
 
   // ── Parse BACKLOG.md ───────────────────────────
@@ -126,7 +142,11 @@ window.BacklogView = (() => {
 
     for (const line of lines) {
       if (!line.startsWith('|')) {
-        if (/^## Backlog$/.test(line))               { inTable = true; headers = []; }
+        // S109 #174 sibling fix: parser now ingests BOTH `## Backlog` AND `## Closed Items`
+        // sections (UI dedupes downstream via item.id; status column distinguishes Done vs active).
+        // Sidesteps file-structural misfile drift (#147-#174 historically appended to Closed Items
+        // section but most were still active; previous parser version stopped at line 193).
+        if (/^## (Backlog|Closed Items)$/.test(line)) { inTable = true; headers = []; }
         else if (/^## /.test(line) && inTable)        { inTable = false; headers = []; }
         continue;
       }
@@ -303,7 +323,14 @@ window.BacklogView = (() => {
       if (branchBacklogMd) {
         const branchItems = parseBacklog(branchBacklogMd);
         if (branchItems.length > 0) {
-          state.items = branchItems;
+          // Merge rather than replace (#134 t7 fix): sprint-branch version wins for items
+          // that exist in both (sprint-specific status/rank per D136). Master-only items
+          // (new CRUD cards written to master but not yet on sprint branch) are preserved.
+          const branchById = new Map(branchItems.map(i => [String(i.id), i]));
+          state.items = state.items.map(i => branchById.get(String(i.id)) || i);
+          // Add sprint-branch-only items (slug items with no master BACKLOG.md row)
+          const masterIdSet = new Set(state.items.map(i => String(i.id)));
+          branchItems.forEach(bi => { if (!masterIdSet.has(String(bi.id))) state.items.push(bi); });
           state.products = extractProducts(state.items);
           state.sessionTypes = extractSessionTypes(state.items);
         }
@@ -324,7 +351,25 @@ window.BacklogView = (() => {
       'needs-reverification': 'Not started',
     };
     if (missingSlugs.length && sprintBranch) {
+      // #212 — synthesize from the index where possible; per-file fetch only for
+      // slugs the index doesn't know (fail-soft parity with the legacy path).
+      const idxCards212 = await fetchIndexCards(CONFIG.username, state.backlogRepo, sprintBranch);
+      const idxBySlug = new Map((idxCards212 || []).map(c => [String(c.id).toLowerCase(), c]));
       const synthesized = await Promise.all(missingSlugs.map(async slug => {
+        const ic = idxBySlug.get(String(slug).toLowerCase());
+        if (ic) {
+          const eff = ic.derived_status || (ic.status ? String(ic.status).toLowerCase().split(/\s+/)[0] : null);
+          return {
+            id: slug,
+            products: ['V-Pro-Hub'],
+            name: ic.title || slug,
+            type: '—', sessionType: '—', phase: '—',
+            priority: ic.priority || '—',
+            status: STATUS_MAP[eff] || ic.status || 'Open',
+            aiTool: '—', rank: null, reason: null, customReason: null,
+            _synthesized: true,
+          };
+        }
         try {
           const md = await Repos.getFile(CONFIG.username, state.backlogRepo, `docs/backlog-detail/${slug.toLowerCase()}.md`, sprintBranch);
           if (!md) return null;
@@ -384,6 +429,8 @@ window.BacklogView = (() => {
 
     return {
       id: active.id,
+      branch: sprintBranch,   // e.g. "sprint/Sprint-6" — used by detail-file writes (#134)
+      sprintFile: filename,   // #188 — canonical SP-*.md filename on the branch (for cadence writeback)
       meta: active,
       frontmatter, planItems, backlogMap, acMap, adaptations, dailyLog,
       health, drift, sessions, sprintMembership,
@@ -413,15 +460,122 @@ window.BacklogView = (() => {
     return 'candidate';
   }
 
+  // #192 — two derived statuses (derive-don't-store, per #187/#130):
+  //   dev-complete    ← the card's own done_criteria (all met AND >=1 actually-tested DC met)
+  //   automation-ready ← the coverage-registry INTERFACE (a suite-registered test covers this card)
+  // Both are computed live; neither is a stored/hand-ticked field, so they can't drift.
+
+  // dev-complete: every done_criterion met AND at least one met via an actual test
+  // (manual-test or e2e-test) — "manually tested at least" per V. code-review-only does not count.
+  function deriveDevComplete(fm) {
+    if (!fm) return false;
+    const dcs = Array.isArray(fm.done_criteria) ? fm.done_criteria : [];
+    if (dcs.length === 0) return false;
+    const norm = v => String(v == null ? '' : v).toLowerCase().trim();
+    const allMet = dcs.every(d => d && norm(d.status) === 'met');
+    const testedMet = dcs.some(d => d && norm(d.status) === 'met' &&
+      ['manual-test', 'manual', 'e2e-test'].includes(norm(d.verification)));
+    return allMet && testedMet;
+  }
+
+  // automation-ready reads the coverage-registry INTERFACE (CP contract): the badge is
+  // true iff a suite-registered test is tagged with this card id. An empty/unloaded
+  // registry -> false (badge simply off) — that is #192's definition-of-done, since #192
+  // ships before #196 fills the real registry.
+  function deriveAutomationReady(cardId) {
+    const reg = state.coverageRegistry;
+    if (!reg) return false;
+    const tests = reg[String(cardId)];
+    return Array.isArray(tests) && tests.length > 0;
+  }
+
+  // Style C (check-glyph outline) + ghost pending off-state, per S119 wireframe pick.
+  // Only cards with done_criteria (a detail file) get badges; raw rows show nothing
+  // (no basis). For tracked cards: green ✓Dev / blue ✓AutoTest when true, dashed muted
+  // "… pending" when not.
+  function renderStatusBadges(item) {
+    const tracked = item._devComplete !== undefined;   // has a detail file with done_criteria
+    const auto = deriveAutomationReady(item.id);        // covered by the regression suite
+    if (!tracked && !auto) return '';                   // untracked + uncovered → no basis, no badges
+    let out = '';
+    // Dev badge only when we have a basis (a detail file); an untracked card's dev state is unknown.
+    if (tracked) {
+      out += item._devComplete === true
+        ? `<span class="bl-chip vs-dev" title="Dev-complete — all done-criteria met, incl. one exercised by a test (#192)"><span class="vs-tick">✓</span>Dev</span>`
+        : `<span class="bl-chip vs-ghost" title="Dev-complete pending — not all done-criteria met, or none exercised by a test yet (#192)">Dev pending</span>`;
+    }
+    // AutoTest badge: ✓ whenever covered (even for untracked cards); "pending" only for tracked ones.
+    if (auto) {
+      const tests = (state.coverageRegistry[String(item.id)] || []).join(', ');
+      out += `<span class="bl-chip vs-auto" title="AutoTest — in the regression suite: ${escHtml(tests)} (#192)"><span class="vs-tick">✓</span>AutoTest</span>`;
+    } else if (tracked) {
+      out += `<span class="bl-chip vs-ghost" title="AutoTest pending — no regression test covers this card yet (#192)">AutoTest pending</span>`;
+    }
+    return out;
+  }
+
   // S067/#129 — Sprint membership derivation from per-card frontmatter (D141 SoT).
   // S068/#130 — also overlays derived status onto state.items during the same fetch.
   // Lists docs/backlog-detail/ on the sprint branch + Promise.all-fetches each
   // per-card frontmatter + builds Map<id, sprintId>. Skips session cards (S0NN.md).
   // Logs drift if a card's sprint field differs from sprint-frontmatter array
   // membership. Returns empty Map on fail-soft.
+  // #212 — single-fetch list path: docs/INDEX.json already carries every card's
+  // frontmatter + the SAME derived_status/dev_complete the per-file path computes
+  // (generator ports #130/#192 rules exactly). Same-origin first (freshest on
+  // dev server AND deployed site), Contents API fallback. null ⇒ caller falls
+  // back to the legacy ~134-round-trip path — no functional regression.
+  async function fetchIndexCards(owner, repo, branch) {
+    if (state._idxCardsMemo !== undefined) return state._idxCardsMemo;   // one fetch per render pass
+    let cards = null;
+    try {
+      const r = await fetch('docs/INDEX.json?cb=' + Date.now(), { cache: 'no-store' });
+      if (r.ok) { const j = await r.json(); if (Array.isArray(j.cards) && j.cards.length) cards = j.cards; }
+    } catch { /* fall through */ }
+    if (!cards) {
+      try {
+        const raw = await Repos.getFile(owner, repo, 'docs/INDEX.json', branch);
+        if (raw) { const j = JSON.parse(raw); if (Array.isArray(j.cards) && j.cards.length) cards = j.cards; }
+      } catch { /* fall through */ }
+    }
+    state._idxCardsMemo = cards;
+    return cards;
+  }
+
   async function buildSprintMembership(owner, repo, sprintBranch, expectedSprintId, sprintFrontmatter) {
     const map = new Map();
     if (!Repos || typeof Repos.listDirectory !== 'function') return map;
+
+    // #212 fast path — one index fetch replaces list-dir + per-card fetches.
+    const idxCards = await fetchIndexCards(owner, repo, sprintBranch);
+    if (idxCards) {
+      const STATUS_MAP_IDX = {
+        'in-progress': 'In Progress ▶', 'done': 'Done ✓', 'blocked': '⏸ Blocked',
+        'open': 'Open', 'candidate': 'Not started', 'planning': 'Not started',
+        'closed': 'Done ✓', 'needs-reverification': 'Not started',
+      };
+      idxCards.forEach(c => {
+        if (!c || c.type === 'session' || /^S\d+$/.test(String(c.id))) return;
+        const id = String(c.backlog_ref || c.id);
+        if (c.sprint) map.set(id, String(c.sprint));
+        const it = state.items.find(i => String(i.id) === id);
+        if (!it) return;
+        if (c.epic != null) it._epic = String(c.epic);
+        if (c.feature != null) it._feature = String(c.feature);
+        it._devComplete = !!c.dev_complete;
+        const effective = c.derived_status || (c.status ? String(c.status).toLowerCase().split(/\s+/)[0] : null);
+        if (effective) {
+          it.status = STATUS_MAP_IDX[effective] || c.status;
+          it._cardStatus = c.status;
+          it._derivedStatus = c.derived_status || null;
+          it._effectiveStatus = effective;
+        }
+      });
+      driftLog(map, expectedSprintId, sprintFrontmatter);
+      return map;
+    }
+
+    // Legacy per-file path (index unreachable) — unchanged behaviour.
     let entries;
     try {
       entries = await Repos.listDirectory(owner, repo, 'docs/backlog-detail', sprintBranch);
@@ -460,6 +614,12 @@ window.BacklogView = (() => {
         const id = String(fm.backlog_ref || fm.id || f.name.replace(/\.md$/, ''));
         // #129 — sprint membership (only if fm.sprint present)
         if (fm.sprint) map.set(id, String(fm.sprint));
+        // #144 — epic/feature badge overlay
+        if (fm.epic    != null) { const it = state.items.find(i => String(i.id) === String(id)); if (it) it._epic    = String(fm.epic); }
+        if (fm.feature != null) { const it = state.items.find(i => String(i.id) === String(id)); if (it) it._feature = String(fm.feature); }
+        // #192 — dev-complete signal (derive-don't-store). Set true/false for every card
+        // with a detail file; cards without one stay undefined → no status badges rendered.
+        { const it = state.items.find(i => String(i.id) === String(id)); if (it) it._devComplete = deriveDevComplete(fm); }
         // #130 — status derivation + overlay (runs regardless of fm.sprint presence
         // so legacy cards without a sprint: field still benefit from derivation)
         const derived = deriveCardStatus(fm);
@@ -478,19 +638,23 @@ window.BacklogView = (() => {
     }));
     // Drift detection: log cards with sprint: ID in frontmatter SoT but missing
     // from sprint-frontmatter arrays (informational; helps Retro analytics).
-    if (expectedSprintId && sprintFrontmatter) {
-      const inAnyArray = new Set([
-        ...(sprintFrontmatter.committed_items || []).map(c => String(c && c.id != null ? c.id : c)),
-        ...(sprintFrontmatter.bg_carries      || []).map(c => String(c && c.id != null ? c.id : c)),
-        ...(sprintFrontmatter.mid_sprint_adds || []).map(c => String(c && c.id != null ? c.id : c)),
-      ]);
-      const sotInSprint = [...map.entries()].filter(([id, sp]) => sp === expectedSprintId).map(([id]) => id);
-      const missingFromArrays = sotInSprint.filter(id => !inAnyArray.has(id));
-      if (missingFromArrays.length > 0) {
-        console.info(`[backlog] #129 SoT-vs-projection drift: ${missingFromArrays.length} card(s) have sprint:${expectedSprintId} in frontmatter but appear in no sprint-frontmatter array — projection lag, not a bug. Cards: ${missingFromArrays.join(', ')}`);
-      }
-    }
+    driftLog(map, expectedSprintId, sprintFrontmatter);
     return map;
+  }
+
+  // #129 drift detection, shared by the #212 index path and the legacy path.
+  function driftLog(map, expectedSprintId, sprintFrontmatter) {
+    if (!expectedSprintId || !sprintFrontmatter) return;
+    const inAnyArray = new Set([
+      ...(sprintFrontmatter.committed_items || []).map(c => String(c && c.id != null ? c.id : c)),
+      ...(sprintFrontmatter.bg_carries      || []).map(c => String(c && c.id != null ? c.id : c)),
+      ...(sprintFrontmatter.mid_sprint_adds || []).map(c => String(c && c.id != null ? c.id : c)),
+    ]);
+    const sotInSprint = [...map.entries()].filter(([id, sp]) => sp === expectedSprintId).map(([id]) => id);
+    const missingFromArrays = sotInSprint.filter(id => !inAnyArray.has(id));
+    if (missingFromArrays.length > 0) {
+      console.info(`[backlog] #129 SoT-vs-projection drift: ${missingFromArrays.length} card(s) have sprint:${expectedSprintId} in frontmatter but appear in no sprint-frontmatter array — projection lag, not a bug. Cards: ${missingFromArrays.join(', ')}`);
+    }
   }
 
   // D146/#120 — Lazy-load closed sprint branches for the Past filter panel.
@@ -516,7 +680,12 @@ window.BacklogView = (() => {
   }
 
   function parseFrontmatter(md) {
-    const match = md.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+    // Normalize CRLF→LF first. The bullet-collection regexes below use `(.*)$`, which
+    // won't match before a trailing `\r` — so a CRLF-encoded source silently parses
+    // ZERO block-list bullets (todos/done_criteria/end_user_scenarios/etc.). GitHub
+    // serves LF so production was unaffected, but any local-FS / CRLF source must work too.
+    md = String(md || '').replace(/\r\n/g, '\n');
+    const match = md.match(/^---\n([\s\S]*?)\n---/);
     if (!match) return {};
     const result = {};
     const lines = match[1].split('\n');
@@ -572,8 +741,24 @@ window.BacklogView = (() => {
         if (inner && cur) {
           const k = inner[1];
           let v = inner[2];
-          v = v.replace(/\s+#.*$/, '').trim().replace(/^["']|["']$/g, '');
-          cur[k] = v;
+          // Strip inline `# comment` only outside brackets (#177 — inline arrays like
+          // `blocked_on: [t1, rb-001]` / `derives_from: [t2, FR3]` must survive comment-strip
+          // AND parse to a real JS array, not the literal string "[t1]"). Mirrors top-level
+          // inline-array handling at line ~629.
+          let inBr = 0, cut = -1;
+          for (let ci = 0; ci < v.length; ci++) {
+            const ch = v[ci];
+            if (ch === '[') inBr++;
+            else if (ch === ']') inBr--;
+            else if (ch === '#' && inBr === 0 && (ci === 0 || v[ci-1] === ' ' || v[ci-1] === '\t')) { cut = ci; break; }
+          }
+          if (cut >= 0) v = v.slice(0, cut);
+          v = v.trim();
+          if (/^\[.*\]$/.test(v)) {
+            cur[k] = v.slice(1, -1).split(',').map(s => s.trim().replace(/^["']|["']$/g, '')).filter(Boolean);
+          } else {
+            cur[k] = v.replace(/^["']|["']$/g, '');
+          }
           j++;
           continue;
         }
@@ -622,7 +807,7 @@ window.BacklogView = (() => {
     //   emit FLAT ID array (preserves the existing consumer contract per S061).
     // - Object-shape keys (todos / done_criteria / team): emit ARRAY OF OBJECTS so
     //   consumers like deriveCardStatus() can read nested sub-fields (S068/#130).
-    const OBJECT_SHAPE_KEYS = new Set(['todos', 'done_criteria', 'team', 'feature_requirements', 'nfr']);
+    const OBJECT_SHAPE_KEYS = new Set(['todos', 'done_criteria', 'team', 'feature_requirements', 'nfr', 'end_user_scenarios', 'scenario_proposals', 'test_sources']);
     const STRING_LIST_KEYS  = new Set(['process_steps']);
     for (const [k, bullets] of Object.entries(blockListFull)) {
       if (OBJECT_SHAPE_KEYS.has(k)) {
@@ -914,6 +1099,48 @@ window.BacklogView = (() => {
 
   // ── Filter logic ───────────────────────────────
 
+  // ── dc6 — URL hash filter persistence ──────────────────────────────────
+  // Encodes non-default filter state into the URL hash query string via
+  // history.replaceState (no hashchange event, no re-render loop).
+  // Format: #/backlog?sprint=Current&q=search&priority=high&status=open
+  // readFilterFromHash() is called at render()-start so filter survives
+  // page reload and copy-paste URL sharing.
+
+  function pushFilterToHash() {
+    try {
+      const qs = new URLSearchParams();
+      if (state.searchQuery)                     qs.set('q',        state.searchQuery);
+      if (state.sprintFilter  !== 'All sprints') qs.set('sprint',   state.sprintFilter);
+      if (state.tierFilter    !== 'All tiers')   qs.set('tier',     state.tierFilter);
+      if (state.productFilter !== 'All')         qs.set('product',  state.productFilter);
+      if (state.sessionFilter !== 'All')         qs.set('session',  state.sessionFilter);
+      if (state.priorityFilter)                  qs.set('priority', state.priorityFilter);
+      if (state.statusFilter)                    qs.set('status',   state.statusFilter);
+      const qStr = qs.toString();
+      // Scoped embed keeps URL on the product route (product filter is implied there).
+      if (state.scopedRoute) qs.delete('product');
+      const base = state.scopedRoute || '#/backlog';
+      const qStr2 = state.scopedRoute ? qs.toString() : qStr;
+      history.replaceState(null, '', qStr2 ? `${base}?${qStr2}` : base);
+    } catch (_) { /* safe no-op if history API unavailable */ }
+  }
+
+  function readFilterFromHash() {
+    try {
+      const raw = window.location.hash; // e.g. '#/backlog?sprint=Current&q=test'
+      const qi = raw.indexOf('?');
+      if (qi === -1) return;
+      const qs = new URLSearchParams(raw.slice(qi + 1));
+      if (qs.has('q'))        state.searchQuery   = qs.get('q');
+      if (qs.has('sprint'))   state.sprintFilter  = qs.get('sprint');
+      if (qs.has('tier'))     state.tierFilter    = qs.get('tier');
+      if (qs.has('product'))  state.productFilter = qs.get('product');
+      if (qs.has('session'))  state.sessionFilter = qs.get('session');
+      if (qs.has('priority')) state.priorityFilter = qs.get('priority') || null;
+      if (qs.has('status'))   state.statusFilter   = qs.get('status')   || null;
+    } catch (_) { /* safe no-op */ }
+  }
+
   // S038 — opts.skipTileFilters=true returns the "tile-count base set":
   // Product / Session / Sprint / Search applied, but priority+status tile filters
   // skipped. Used by renderSummary so tile counts stay stable as tiles are toggled
@@ -935,6 +1162,13 @@ window.BacklogView = (() => {
       ...((state.activeSprint.frontmatter.committed_items || []).map(c => String(c && c.id != null ? c.id : c))),
       ...((state.activeSprint.frontmatter.bg_carries      || []).map(c => String(c && c.id != null ? c.id : c))),
       ...((state.activeSprint.frontmatter.mid_sprint_adds || []).map(c => String(c && c.id != null ? c.id : c))),
+      // S115 fix: stretch_items[] are part of the current sprint (stretch goals) but
+      // were omitted from the union, so a stretch card with a stale/non-matching
+      // per-card `sprint:` field (e.g. #137, carried Sprint 5→9) fell through BOTH
+      // the #129 membership path and this fallback → invisible in the Current view.
+      ...((state.activeSprint.frontmatter.stretch_items   || []).map(c => String(c && c.id != null ? c.id : c))),
+      // NOTE: cold_storage[] intentionally NOT included — D149 "visible-but-frozen"
+      // needs distinct frozen treatment, not a plain kanban card (separate deferred gap, S086).
     ]) : new Set();
     const useSoT = sprintMembership.size > 0;
 
@@ -949,6 +1183,13 @@ window.BacklogView = (() => {
         : legacyUnion.has(idStr);
       if (state.sprintFilter === 'Current' && !inCurrent) return false;
       if (state.sprintFilter === 'No sprint' && inCurrent) return false;
+
+      // #187 (D152) — Tier filter. Independent of sprintFilter: getSprintTier()
+      // already only returns non-null for cards in the active sprint's arrays.
+      if (state.tierFilter !== 'All tiers') {
+        const tierMap = { 'Comfortable goal': 'comfortable', 'Stretch lounge': 'stretch', 'Cold storage': 'cold' };
+        if (getSprintTier(i) !== tierMap[state.tierFilter]) return false;
+      }
       // 'Past' filter under D146/#120: items in this view are still all-items;
       // the historical snapshots live as separate per-closed-branch panels rendered
       // alongside (see renderPastSprintsPanel below). Future card: clicking a past
@@ -976,6 +1217,8 @@ window.BacklogView = (() => {
           .join(' ').toLowerCase();
         if (!hay.includes(q)) return false;
       }
+      // S120 IA Phase 4 — Epic filter (A20/A21)
+      if (state.epicFilter && i._epic !== state.epicFilter) return false;
       return true;
     });
   }
@@ -993,6 +1236,11 @@ window.BacklogView = (() => {
         <div class="bl-vh-sub">${state.items.length} items</div>
       </div>
     </div>`;
+  }
+
+  // #134 CRUDQ — floating action button (FAB) for creating a new backlog item
+  function renderFab() {
+    return `<button class="bl-fab" id="bl-fab-add" title="Add a new backlog item" aria-label="Add backlog item">+</button>`;
   }
 
   function renderReadOnlyBanner() {
@@ -1026,6 +1274,13 @@ window.BacklogView = (() => {
         data-stype="${escHtml(s)}"><span class="bl-fa-dot"></span>${escHtml(s)}</button>`
     ).join('');
 
+    // #187 (D152) — Tier filter chips: All tiers / Comfortable goal / Stretch lounge / Cold storage
+    const tiers = ['All tiers', 'Comfortable goal', 'Stretch lounge', 'Cold storage'];
+    const tierChips = tiers.map(t =>
+      `<button class="bl-fa-chip${t === state.tierFilter ? ' active' : ''}"
+        data-tier="${escHtml(t)}"><span class="bl-fa-dot"></span>${escHtml(t)}</button>`
+    ).join('');
+
     const spChips = sprints.map(s =>
       `<button class="bl-fa-chip${s === state.sprintFilter ? ' active' : ''}"
         data-sprint="${escHtml(s)}"><span class="bl-fa-dot"></span>${escHtml(s)}</button>`
@@ -1046,19 +1301,34 @@ window.BacklogView = (() => {
       </button>`;
     })();
 
+    // S120 IA Phase 4 — Epic filter (type-ahead over distinct epic ids on loaded items)
+    const epicOptions = [...new Set(state.items.map(i => i._epic).filter(Boolean))].sort();
+    const epicAxis = `<div class="bl-fa-axis"><div class="bl-fa-axis-label">Epic</div>
+      <div class="bl-fa-chips" style="flex:1;align-items:center">
+        <input class="bl-fa-epic-input" id="bl-epic-filter" list="bl-epic-list" placeholder="◈ filter by epic…" autocomplete="off" value="${escAttr(state.epicFilter || '')}">
+        <datalist id="bl-epic-list">${epicOptions.map(e => `<option value="${escAttr(e)}"></option>`).join('')}</datalist>
+        ${state.epicFilter ? `<button class="bl-fa-chip active" id="bl-epic-clear"><span class="bl-fa-dot"></span>✕ ${escHtml(state.epicFilter)}</button>` : ''}
+      </div></div>`;
+
     // S037ext #90 — VM toggle now visible across all sprint filters (was: Current only)
     const vmRow = `<div class="bl-fa-axis" style="justify-content:flex-end">
       <div style="flex:1"></div>
       <div class="bl-vm">
         <button class="bl-vm-btn${state.vmMode === 'list'  ? ' active' : ''}" data-vm="list"><span class="bl-vm-ic">▤</span> List</button>
         <button class="bl-vm-btn${state.vmMode === 'board' ? ' active' : ''}" data-vm="board"><span class="bl-vm-ic">▦</span> Board</button>
+        <button class="bl-vm-btn${state.vmMode === 'epic'  ? ' active' : ''}" data-vm="epic"><span class="bl-vm-ic">◈</span> Epic</button>
       </div>
     </div>`;
 
+    // Scoped embed: product is fixed by the route — drop the product axis (CD: disabled select).
+    const productAxis = state.scopedRoute ? '' :
+      `<div class="bl-fa-axis"><div class="bl-fa-axis-label">Product</div><div class="bl-fa-tabs" id="bl-product-tabs">${tabs}</div></div>`;
     return `<div class="bl-fa" id="bl-filter-area">
-      <div class="bl-fa-axis"><div class="bl-fa-axis-label">Product</div><div class="bl-fa-tabs" id="bl-product-tabs">${tabs}</div></div>
+      ${productAxis}
       <div class="bl-fa-axis"><div class="bl-fa-axis-label">Session</div><div class="bl-fa-chips" id="bl-stype-chips">${sChips}</div></div>
       <div class="bl-fa-axis"><div class="bl-fa-axis-label">Sprint</div><div class="bl-fa-chips" id="bl-sprint-chips">${spChips}</div></div>
+      <div class="bl-fa-axis"><div class="bl-fa-axis-label">Tier</div><div class="bl-fa-chips" id="bl-tier-chips">${tierChips}</div></div>
+      ${epicAxis}
       ${vmRow}
     </div>`;
   }
@@ -1166,6 +1436,7 @@ window.BacklogView = (() => {
           <span class="bl-ctx-progress"><span class="bl-ctx-progress-fill" style="width:${pct}%"></span></span>
           <span class="bl-ctx-pct">${pct}%</span>
         </span>
+        ${isReadOnly() ? '' : `<button class="bl-cad-btn" id="bl-cad-open" type="button" title="Extend or shorten this sprint (#188)">⤢ Adjust cadence</button>`}
       </div>
       <div class="health-strip">${healthHtml}</div>
       ${driftHtml ? `<div style="display:flex;flex-direction:column;gap:8px">${driftHtml}</div>` : ''}
@@ -1237,6 +1508,28 @@ window.BacklogView = (() => {
     return `<span class="${cls}" data-reason-trigger data-id="${escHtml(item.id)}"${titleAttr}>${escHtml(txt)}${txt ? '<span class="bl-ic-reason-caret">▾</span>' : ''}</span>`;
   }
 
+  // #187 (D152) — sprint tier lookup: return 'comfortable' | 'stretch' | 'cold' | null,
+  // derived live from the active sprint's frontmatter arrays (committed_items[] /
+  // stretch_items[] / cold_storage[]). No new field is stored on the card — the tier
+  // is sprint-scoped and recomputed here every render, same source as filteredItems()'s
+  // sprintMembership/legacyUnion (~line 1013-1024), so it cannot drift out of sync.
+  const TIER_LABEL = { comfortable: 'Comfortable', stretch: 'Stretch', cold: 'Cold' };
+  function getSprintTier(item) {
+    if (!state.activeSprint) return null;
+    const idStr = String(item.id);
+    const fm = state.activeSprint.frontmatter || {};
+    const inArr = (arr) => (arr || []).some(c => String(c && c.id != null ? c.id : c) === idStr);
+    if (inArr(fm.committed_items)) return 'comfortable';
+    if (inArr(fm.stretch_items))   return 'stretch';
+    if (inArr(fm.cold_storage))    return 'cold';
+    return null;
+  }
+  function renderTierBadge(item) {
+    const tier = getSprintTier(item);
+    if (!tier) return '';
+    return `<span class="bl-chip tier-${tier}" title="Sprint tier: ${TIER_LABEL[tier]} (D152)"><span class="bl-chip-dot"></span>${TIER_LABEL[tier]}</span>`;
+  }
+
   // #86 Sprint Priority badge — return 'P1'/'P2'/... if item is in active sprint's
   // committed_items planItems list, else null.
   function getSprintPriority(item) {
@@ -1258,8 +1551,10 @@ window.BacklogView = (() => {
     const sText = done ? 'Done ✓' : item.status.replace(' ▶', '').replace(' ⏸', '');
     const tags = item.products.map(p => `<span class="bl-ic-tag">${escHtml(p)}</span>`).join('');
     const dropClass = item._dropHint ? ` drop-${item._dropHint}` : '';
-    const hasGripCls = isReadOnly() ? '' : ' has-grip';
-    const grip = isReadOnly() ? '' : `<span class="bl-grip" draggable="true" data-id="${escHtml(item.id)}" title="Drag to reorder"><span class="bl-grip-glyph">⋮⋮</span></span>`;
+    // Injected feature items (scoped product embed) are read-only rows: no grip / edit / delete.
+    const rowReadOnly = isReadOnly() || item._isFeature;
+    const hasGripCls = rowReadOnly ? '' : ' has-grip';
+    const grip = rowReadOnly ? '' : `<span class="bl-grip" draggable="true" data-id="${escHtml(item.id)}" title="Drag to reorder"><span class="bl-grip-glyph">⋮⋮</span></span>`;
 
     // #86 — sprint priority badge (P1/P2/... when item is in active sprint's committed_items)
     const sprintPrio = getSprintPriority(item);
@@ -1272,15 +1567,20 @@ window.BacklogView = (() => {
         <div class="bl-ic-name">${inline(item.name)}</div>
         <div class="bl-ic-meta">
           ${sprintPrioBadge}
-          <span class="bl-ic-id">#${escHtml(item.id)}</span>
+          <span class="bl-ic-id">${/^\d/.test(String(item.id)) ? '#' : ''}${escHtml(item.id)}</span>
           <span class="bl-ic-sep">·</span>
           ${tags}
           ${renderReasonChip(item)}
         </div>
       </div>
       <div class="bl-ic-glance">
+        ${renderTierBadge(item)}
         <span class="bl-chip ${prioCls}"><span class="bl-chip-dot"></span>${escHtml(item.priority === 'HIGH' || item.priority === 'SUPER HIGH' ? 'High' : item.priority)}</span>
         <span class="bl-chip ${sCls}"><span class="bl-chip-dot"></span>${escHtml(sText)}</span>
+        ${item._epic ? `<span class="bl-chip" data-kc-nav-epic="${escAttr(item._epic)}" style="cursor:pointer;background:var(--accent-soft-bg);color:var(--accent-soft-fg);border:1px solid var(--accent-soft-bd)" title="Filter to ${escHtml(item._epic)}">${escHtml(item._epic)}</span>` : ''}
+        ${renderStatusBadges(item)}
+        ${rowReadOnly ? '' : `<button class="bl-ic-edit" data-edit-id="${escHtml(item.id)}" title="Edit this item">✎</button>`}
+        ${rowReadOnly ? '' : `<button class="bl-ic-del" data-del-id="${escHtml(item.id)}" title="Delete this item">⊘</button>`}
       </div>
     </div>`;
   }
@@ -1326,16 +1626,21 @@ window.BacklogView = (() => {
     const saveDot  = item._saveDot ? `<span class="kc-savedot ${item._saveDot}" title="${item._saveDot}"></span>` : '';
     const ac = state.activeSprint && state.activeSprint.acMap[parseInt(item.id)];
     const acStr = ac ? `${ac.done}/${ac.total} AC` : '';
-    return `<div class="kanban-card ${railCls}${dragging}" draggable="${isReadOnly() ? 'false' : 'true'}" data-id="${escHtml(item.id)}">
+    const epicBadge    = item._epic    ? `<span class="kc-epic-badge"    data-kc-nav-epic="${escHtml(item._epic)}">${escHtml(item._epic)}</span>` : '';
+    const featureBadge = item._feature ? `<span class="kc-feature-badge" data-kc-nav-feature="${escHtml(item._feature)}">${escHtml(item._feature)}</span>` : '';
+    return `<div class="kanban-card ${railCls}${dragging}" draggable="${(isReadOnly() || item._isFeature) ? 'false' : 'true'}" data-id="${escHtml(item.id)}">
       ${saveDot}
       <div class="kc-header">
-        <span class="kc-rank">#${item.rank ?? '—'}·${escHtml(item.id)}</span>
+        <span class="kc-rank">${item._isFeature ? escHtml(item.id) : `#${item.rank ?? '—'}·${escHtml(item.id)}`}</span>
         <span style="flex:1"></span>
+        ${renderTierBadge(item)}
         <span class="kc-name-tag">${escHtml(item.priority)}</span>
       </div>
       <div class="kc-name">${escHtml(item.name)}</div>
       <div class="kc-footer">
         ${acStr ? `<span>${escHtml(acStr)}</span>` : ''}
+        ${renderStatusBadges(item)}
+        ${epicBadge}${featureBadge}
       </div>
     </div>`;
   }
@@ -1377,6 +1682,65 @@ window.BacklogView = (() => {
     </div>`).join('')}</div>`;
   }
 
+  // ── Render: Epic mode (S120 IA Phase 4 — group filtered items by epic) ─
+  // R2.3 (CD UX spec) — nested epic → feature → card tree. Epic and feature nodes
+  // collapse independently; default on first open = epics expanded one level
+  // (features visible), cards collapsed. State persists while the surface is open.
+  function renderEpicTree(items) {
+    if (items.length === 0) return renderItemsList(items);   // reuse empty-state
+    const isDone = i => /Done|✓/i.test(i.status) || i.status.toLowerCase() === 'closed';
+    const groups = {}; const order = [];
+    for (const it of items) {
+      const key = it._epic || '(no epic)';
+      if (!groups[key]) { groups[key] = []; order.push(key); }
+      groups[key].push(it);
+    }
+    order.sort((a, b) => a === '(no epic)' ? 1 : b === '(no epic)' ? -1 : a.localeCompare(b));
+    state.epicCollapsed = state.epicCollapsed || {};
+    state.featCollapsed = state.featCollapsed || {};        // default true (cards collapsed)
+    const featOpen = key => state.featCollapsed[key] === false;
+    const statusChip = it => {
+      const cls = isDone(it) ? 'status-done' : /Progress/i.test(it.status) ? 'status-progress' : /Blocked/i.test(it.status) ? 'status-block' : 'status-open';
+      return `<span class="bl-chip ${cls}"><span class="bl-chip-dot"></span>${escHtml(isDone(it) ? 'Done ✓' : it.status.replace(' ▶', '').replace(' ⏸', ''))}</span>`;
+    };
+    return `<div class="bl-epic-tree">` + order.map(epic => {
+      const list = groups[epic].sort((a, b) => (a.rank ?? 9999) - (b.rank ?? 9999));
+      const done = list.filter(isDone).length;
+      const collapsed = !!state.epicCollapsed[epic];
+      // Feature tier: feature-items in this epic ∪ distinct _feature refs on its cards
+      const featItems = list.filter(i => i._isFeature);
+      const cards = list.filter(i => !i._isFeature);
+      const featIds = [...new Set([...featItems.map(f => String(f.id)), ...cards.map(c => c._feature).filter(Boolean)])].sort();
+      const byFeat = {}; featIds.forEach(f => { byFeat[f] = []; });
+      const direct = [];
+      cards.forEach(c => { if (c._feature && byFeat[c._feature]) byFeat[c._feature].push(c); else direct.push(c); });
+      const featNodes = featIds.map(fid => {
+        const fitem = featItems.find(f => String(f.id) === fid);
+        const kids = byFeat[fid];
+        const key = `${epic}|${fid}`;
+        const open = featOpen(key);
+        return `<div class="bl-feat-node">
+          <div class="bl-feat-head" data-feat-toggle="${escAttr(key)}">
+            <span class="bl-epic-caret${open ? ' open' : ''}">▶</span>
+            <span class="bl-feat-id" data-kc-nav-feature="${escAttr(fid)}" title="Open feature detail">${escHtml(fid)}</span>
+            <span class="bl-feat-name">${escHtml(fitem ? fitem.name : '')}</span>
+            ${fitem ? statusChip(fitem) : ''}
+            <span class="bl-epic-count">${kids.length} card${kids.length !== 1 ? 's' : ''}</span>
+          </div>
+          <div class="bl-feat-body"${open ? '' : ' style="display:none"'}>${kids.map(renderItem).join('') || ''}</div>
+        </div>`;
+      }).join('');
+      return `<div class="bl-epic-group">
+        <div class="bl-epic-head" data-epic-toggle="${escAttr(epic)}">
+          <span class="bl-epic-caret${collapsed ? '' : ' open'}">▶</span>
+          <span class="bl-epic-id">${escHtml(epic)}</span>
+          <span class="bl-epic-count">${list.length} item${list.length !== 1 ? 's' : ''} · ${done} done</span>
+        </div>
+        <div class="bl-epic-body"${collapsed ? ' style="display:none"' : ''}>${featNodes}${direct.map(renderItem).join('')}</div>
+      </div>`;
+    }).join('') + `</div>`;
+  }
+
   function fullRender(container) {
     const items = filteredItems();
     const tileBase = filteredItems({ skipTileFilters: true });
@@ -1394,8 +1758,11 @@ window.BacklogView = (() => {
       ${renderSummary(tileBase)}
       ${showSprintCtx ? renderSprintBand() : ''}
       ${showPastSprints ? renderPastSprintsPanel() : ''}
-      <div id="bl-main-canvas">${showKanban ? renderKanban(items) : renderItemsList(items)}</div>
+      <div id="bl-main-canvas">${state.vmMode === 'epic' ? renderEpicTree(items) : showKanban ? renderKanban(items) : renderItemsList(items)}</div>
       ${showSprintCtx ? renderAuxPanels() : ''}
+      ${renderCrudModal()}
+      ${renderCadenceModal()}
+      ${isReadOnly() ? '' : renderFab()}
     `;
     wireEvents(container);
   }
@@ -1452,7 +1819,7 @@ window.BacklogView = (() => {
     const tileBase = filteredItems({ skipTileFilters: true });
     const showKanban = state.vmMode === 'board';
     const canvas = container.querySelector('#bl-main-canvas');
-    if (canvas) canvas.innerHTML = showKanban ? renderKanban(items) : renderItemsList(items);
+    if (canvas) canvas.innerHTML = state.vmMode === 'epic' ? renderEpicTree(items) : showKanban ? renderKanban(items) : renderItemsList(items);
     wireCanvasEvents(container);
     // Update summary (counts from tile-base; selection state from current filters)
     const summary = container.querySelector('.bl-sb');
@@ -1467,16 +1834,18 @@ window.BacklogView = (() => {
     if (searchEl) {
       searchEl.addEventListener('input', e => {
         state.searchQuery = e.target.value;
+        pushFilterToHash();
         updateCanvas(container);
       });
       searchEl.addEventListener('keydown', e => {
-        if (e.key === 'Escape' && searchEl.value) { searchEl.value = ''; state.searchQuery = ''; updateCanvas(container); }
+        if (e.key === 'Escape' && searchEl.value) { searchEl.value = ''; state.searchQuery = ''; pushFilterToHash(); updateCanvas(container); }
       });
     }
     // Product tabs
     container.querySelectorAll('#bl-product-tabs .bl-fa-tab').forEach(btn => {
       btn.addEventListener('click', () => {
         state.productFilter = btn.dataset.product;
+        pushFilterToHash();
         fullRender(container);
       });
     });
@@ -1484,6 +1853,7 @@ window.BacklogView = (() => {
     container.querySelectorAll('#bl-stype-chips .bl-fa-chip').forEach(btn => {
       btn.addEventListener('click', () => {
         state.sessionFilter = btn.dataset.stype;
+        pushFilterToHash();
         fullRender(container);
       });
     });
@@ -1498,6 +1868,15 @@ window.BacklogView = (() => {
         if (state.sprintFilter === 'Past' && state.pastSprintBranches === null && !state.pastSprintBranchesLoading) {
           loadPastSprintBranches().then(() => fullRender(container));
         }
+        pushFilterToHash();
+        fullRender(container);
+      });
+    });
+    // #187 (D152) — Tier chips
+    container.querySelectorAll('#bl-tier-chips .bl-fa-chip').forEach(btn => {
+      btn.addEventListener('click', () => {
+        state.tierFilter = btn.dataset.tier;
+        pushFilterToHash();
         fullRender(container);
       });
     });
@@ -1505,6 +1884,40 @@ window.BacklogView = (() => {
     container.querySelectorAll('.bl-vm-btn').forEach(btn => {
       btn.addEventListener('click', () => { state.vmMode = btn.dataset.vm; state.vmManual = true; fullRender(container); });
     });
+    // Epic-mode: collapse/expand an epic group (S120 Phase 4)
+    container.querySelectorAll('.bl-epic-head').forEach(head => {
+      head.addEventListener('click', () => {
+        const epic = head.getAttribute('data-epic-toggle');
+        state.epicCollapsed = state.epicCollapsed || {};
+        state.epicCollapsed[epic] = !state.epicCollapsed[epic];
+        const body = head.nextElementSibling;
+        const caret = head.querySelector('.bl-epic-caret');
+        if (body) body.style.display = state.epicCollapsed[epic] ? 'none' : '';
+        if (caret) caret.classList.toggle('open', !state.epicCollapsed[epic]);
+      });
+    });
+    // R2.3 — feature-node collapse/expand (independent of epic; default collapsed)
+    container.querySelectorAll('.bl-feat-head').forEach(head => {
+      head.addEventListener('click', e => {
+        if (e.target.closest('[data-kc-nav-feature]')) return;  // id badge → feature detail
+        const key = head.getAttribute('data-feat-toggle');
+        state.featCollapsed = state.featCollapsed || {};
+        const nowOpen = state.featCollapsed[key] === false;
+        state.featCollapsed[key] = nowOpen ? true : false;
+        const body = head.nextElementSibling;
+        const caret = head.querySelector('.bl-epic-caret');
+        if (body) body.style.display = nowOpen ? 'none' : '';
+        if (caret) caret.classList.toggle('open', !nowOpen);
+      });
+    });
+    // Epic filter input + clear (S120 Phase 4 — A20/A21)
+    const epicInput = container.querySelector('#bl-epic-filter');
+    if (epicInput) epicInput.addEventListener('change', () => {
+      state.epicFilter = epicInput.value.trim();
+      pushFilterToHash(); fullRender(container);
+    });
+    const epicClear = container.querySelector('#bl-epic-clear');
+    if (epicClear) epicClear.addEventListener('click', () => { state.epicFilter = ''; pushFilterToHash(); fullRender(container); });
     // S037ext Track E — Summary tile click → filter toggle
     // Tile counts are derived from open items for high/med/low (per
     // S035 design); priority-tile clicks imply statusFilter='open' so
@@ -1542,23 +1955,29 @@ window.BacklogView = (() => {
             state.statusFilter = null;
           }
         }
+        pushFilterToHash();
         fullRender(container);
       });
     });
     // Range date inputs
     const rs = container.querySelector('#bl-range-start');
     const re = container.querySelector('#bl-range-end');
-    if (rs) rs.addEventListener('change', e => { state.rangeStart = e.target.value; updateCanvas(container); });
-    if (re) re.addEventListener('change', e => { state.rangeEnd   = e.target.value; updateCanvas(container); });
+    if (rs) rs.addEventListener('change', e => { state.rangeStart = e.target.value; pushFilterToHash(); updateCanvas(container); });
+    if (re) re.addEventListener('change', e => { state.rangeEnd   = e.target.value; pushFilterToHash(); updateCanvas(container); });
     // Sprint band collapse (mobile only via CSS, but click anywhere on head toggles state)
     const bandHead = container.querySelector('#bl-band-head');
     if (bandHead) {
-      bandHead.addEventListener('click', () => {
+      bandHead.addEventListener('click', (e) => {
+        // #188 — don't collapse the band when the Adjust-cadence button is clicked.
+        if (e.target.closest('#bl-cad-open')) return;
         state.bandCollapsed = !state.bandCollapsed;
         const band = container.querySelector('#bl-sprint-band');
         if (band) band.setAttribute('data-collapsed', state.bandCollapsed);
       });
     }
+    // #188 — Adjust-cadence affordance on the sprint band
+    const cadOpenBtn = container.querySelector('#bl-cad-open');
+    if (cadOpenBtn) cadOpenBtn.addEventListener('click', (e) => { e.stopPropagation(); openCadenceModal(container); });
     // Aux panel collapse
     container.querySelectorAll('.bl-ctx-panel-head').forEach(h => {
       h.addEventListener('click', () => {
@@ -1566,6 +1985,60 @@ window.BacklogView = (() => {
         if (panel) panel.classList.toggle('collapsed');
       });
     });
+    // #134 CRUDQ — FAB "+" button
+    const addBtn = container.querySelector('#bl-fab-add');
+    if (addBtn) addBtn.addEventListener('click', () => openCrudModal(container, 'create', null));
+
+    // #134 CRUDQ — modal close / save buttons + overlay background dismiss
+    if (state.crudModal) {
+      const cl = container.querySelector('#bl-crud-close');
+      const cn = container.querySelector('#bl-crud-cancel');
+      const sv = container.querySelector('#bl-crud-save');
+      const ov = container.querySelector('#bl-crud-overlay');
+      if (cl) cl.addEventListener('click', () => closeCrudModal(container));
+      if (cn) cn.addEventListener('click', () => closeCrudModal(container));
+      if (sv) sv.addEventListener('click', () => submitCrudModal(container));
+      // Outside-click dismiss intentionally removed — form data loss risk (#134 t7 feedback)
+      // Per-todo checkboxes (t4 #134)
+      container.querySelectorAll('.bl-crud-todo-chk').forEach(chk => {
+        chk.addEventListener('change', e => {
+          handleTodoFlip(container, chk.dataset.cardId, chk.dataset.todoId, e.target.checked);
+        });
+      });
+    }
+
+    // #188 — cadence modal close / save / inputs
+    if (state.cadenceModal) {
+      const cl = container.querySelector('#bl-cad-close');
+      const cn = container.querySelector('#bl-cad-cancel');
+      const sv = container.querySelector('#bl-cad-save');
+      if (cl) cl.addEventListener('click', () => closeCadenceModal(container));
+      if (cn) cn.addEventListener('click', () => closeCadenceModal(container));
+      if (sv) sv.addEventListener('click', () => submitCadenceModal(container));
+      const dateEl = container.querySelector('#bl-cad-newend');
+      if (dateEl) {
+        dateEl.addEventListener('input',  () => updateCadencePreview(container));
+        dateEl.addEventListener('change', () => updateCadencePreview(container));
+      }
+      container.querySelectorAll('.bl-cad-reason-chk').forEach(chk => {
+        chk.addEventListener('change', e => {
+          const rc = chk.dataset.rc;
+          if (!state.cadenceModal) return;
+          if (e.target.checked) state.cadenceModal.reasonClasses.add(rc);
+          else state.cadenceModal.reasonClasses.delete(rc);
+          // Toggle the pill styling without a full re-render (keeps focus/date state).
+          const lbl = chk.closest('.bl-cad-reason');
+          if (lbl) lbl.classList.toggle('is-on', e.target.checked);
+          updateCadencePreview(container);
+        });
+      });
+      // Preserve the typed reason across re-renders (fullRender rebuilds the DOM).
+      const txtEl = container.querySelector('#bl-cad-reasontext');
+      if (txtEl) txtEl.addEventListener('input', e => { if (state.cadenceModal) state.cadenceModal.reasonText = e.target.value; });
+      // Initial preview if a date is already present.
+      updateCadencePreview(container);
+    }
+
     wireCanvasEvents(container);
   }
 
@@ -1573,7 +2046,8 @@ window.BacklogView = (() => {
     // Clear filters CTA
     const cta = container.querySelector('#bl-clear-filters');
     if (cta) cta.addEventListener('click', () => {
-      state.productFilter = 'All'; state.sessionFilter = 'All'; state.sprintFilter = 'All sprints';
+      state.productFilter = state.scopedProductName || 'All'; state.sessionFilter = 'All'; state.sprintFilter = 'All sprints';
+      state.tierFilter = 'All tiers';
       state.searchQuery = ''; state.vmManual = false; state.vmMode = 'list';
       fullRender(container);
     });
@@ -1613,6 +2087,37 @@ window.BacklogView = (() => {
         if (isReadOnly()) return;
         e.stopPropagation();
         openReasonPopover(container, el);
+      });
+    });
+    // #134 CRUDQ — Edit button on each item row
+    container.querySelectorAll('.bl-ic-edit').forEach(btn => {
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        if (isReadOnly()) return;
+        const item = state.items.find(i => i.id === btn.dataset.editId);
+        if (item) openCrudModal(container, 'edit', item);
+      });
+    });
+    // #134 CRUDQ — Delete button on each item row
+    container.querySelectorAll('.bl-ic-del').forEach(btn => {
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        if (isReadOnly()) return;
+        const id = btn.dataset.delId;
+        const item = state.items.find(i => i.id === id);
+        if (!item) return;
+        const confirmed = confirm(
+          `Delete #${id} — "${item.name}"?\n\nThis removes the row from BACKLOG.md.\nThe detail file (if any) is NOT deleted.`
+        );
+        if (!confirmed) return;
+        saveStart();
+        writeBacklogDelete(id)
+          .then(() => {
+            pushToast({ kind: 'success', msg: `#${id} deleted from backlog`, ttl: 3000 });
+            fullRender(container);
+          })
+          .catch(err => pushToast({ kind: 'danger', icon: '⚠', msg: `Delete failed: ${err.message}`, ttl: 5000 }))
+          .finally(() => saveEnd());
       });
     });
     // Drag-handle row reorder + kanban drag-drop
@@ -1790,10 +2295,21 @@ window.BacklogView = (() => {
       });
     });
 
+    // #144 / S120 Phase 4 A25 — Epic badge click now FILTERS the backlog to that epic
+    // (CD cross-link); Feature badge still navigates to feature detail.
+    container.querySelectorAll('[data-kc-nav-epic]').forEach(el => {
+      el.addEventListener('click', e => { e.stopPropagation(); state.epicFilter = el.dataset.kcNavEpic; pushFilterToHash(); fullRender(container); });
+    });
+    container.querySelectorAll('[data-kc-nav-feature]').forEach(el => {
+      el.addEventListener('click', e => { e.stopPropagation(); navigate('feature', el.dataset.kcNavFeature); });
+    });
+
     // Kanban card drag
     container.querySelectorAll('.kanban-card').forEach(card => {
       card.addEventListener('click', () => {
         if (_drag.id) return;  // suppress click when drag just ended
+        // Injected feature items route to feature detail, not card detail.
+        if (/^F-/.test(card.dataset.id)) { navigate('feature', card.dataset.id); return; }
         navigate('card', card.dataset.id);
       });
       card.addEventListener('dragstart', e => {
@@ -1925,16 +2441,51 @@ window.BacklogView = (() => {
     return '—';
   }
 
-  function rebuildBacklogMd(originalMd) {
-    // Parse the table, reconstruct with current state.items values
+  // Build a pipe-delimited row string from a headers array + item object.
+  // Used by rebuildBacklogMd when appending a brand-new row (t2 #134).
+  function buildRowLine(headers, item) {
+    const cells = headers.map(h => {
+      if (h === '#')            return String(item.id);
+      if (h === 'products')     return (item.products || []).join(', ');
+      if (h === 'name')         return item.name || '';
+      if (h === 'type')         return item.type || '—';
+      if (h === 'session type') return item.sessionType || '—';
+      if (h === 'phase')        return item.phase || '—';
+      if (h === 'priority')     return item.priority || '—';
+      if (h === 'status')       return item.status || 'Open';
+      if (h === 'ai tools')     return item.aiTool || '—';
+      if (h === 'rank')         return item.rank != null ? String(item.rank) : '—';
+      if (h === 'reason')       return '—';
+      return '—';
+    });
+    return '| ' + cells.join(' | ') + ' |';
+  }
+
+  function rebuildBacklogMd(originalMd, opts) {
+    // Parse the table, reconstruct with current state.items values.
+    // opts.appendRow — new item object to insert after last data row in the Backlog table.
+    opts = opts || {};
     const lines = originalMd.split('\n');
     const out = [];
-    let inTable = false; let headers = []; let headerLineIdx = -1;
+    let inTable = false; let headers = []; let tableHeaders = [];
+    let pendingAppend = opts.appendRow || null;
+
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       if (!line.startsWith('|')) {
-        if (/^## Backlog$/.test(line)) inTable = true;
-        else if (/^## /.test(line) && inTable) inTable = false;
+        if (/^## Backlog$/.test(line)) {
+          inTable = true;
+          out.push(line);
+          continue;
+        }
+        if (/^## /.test(line) && inTable) {
+          // Leaving the Backlog table section — flush any pending append first
+          if (pendingAppend && tableHeaders.length) {
+            out.push(buildRowLine(tableHeaders, pendingAppend));
+            pendingAppend = null;
+          }
+          inTable = false;
+        }
         out.push(line);
         continue;
       }
@@ -1945,26 +2496,229 @@ window.BacklogView = (() => {
 
       if (cells[0] === '#' && headers.length === 0) {
         headers = cells.map(c => c.toLowerCase().replace(/[()]/g, '').trim());
-        headerLineIdx = i;
+        tableHeaders = headers;
         out.push(line);
         continue;
       }
       if (headers.length && /^\d+$/.test(cells[0])) {
         const id = cells[0];
+        // opts.deleteId — skip this row (delete operation)
+        if (opts.deleteId && id === String(opts.deleteId)) continue;
         const item = state.items.find(x => x.id === id);
         if (!item) { out.push(line); continue; }
         const newCells = cells.slice();
         headers.forEach((h, idx) => {
-          if (h === 'status') newCells[idx] = item.status;
-          else if (h === 'rank')   newCells[idx] = item.rank == null ? '—' : String(item.rank);
-          else if (h === 'reason') newCells[idx] = reasonCellValue(item);
+          if (h === 'status')    newCells[idx] = item.status;
+          else if (h === 'rank')     newCells[idx] = item.rank == null ? '—' : String(item.rank);
+          else if (h === 'reason')   newCells[idx] = reasonCellValue(item);
+          else if (h === 'name')     newCells[idx] = item.name;
+          else if (h === 'priority') newCells[idx] = item.priority || '—';
+          else if (h === 'products') newCells[idx] = (item.products || []).join(', ');
         });
         out.push('| ' + newCells.join(' | ') + ' |');
         continue;
       }
       out.push(line);
     }
+    // EOF while still in Backlog table (no trailing ## heading)
+    if (pendingAppend && tableHeaders.length) {
+      out.push(buildRowLine(tableHeaders, pendingAppend));
+    }
     return out.join('\n');
+  }
+
+  // ── #188 — Sprint cadence adjustment (extend / shorten) ─────────
+  //
+  // Client-side mirror of scripts/adjust_sprint_cadence.py (S107 #162), non-backfill
+  // path. This MUST stay in lockstep with that script AND validate_sprint_schema.py:
+  // a Contents-API PUT (Repos.putFile) bypasses the local cadence-ledger pre-commit
+  // gate, so the file we write has to satisfy the cadence + extension_history[] chain/
+  // sync invariants BY CONSTRUCTION — the gate can't catch us here. See docs/backlog-detail/188.md.
+
+  const CADENCE_REASON_ENUM = [
+    'go-live-stability', 'cadence-realignment', 'v-unavailable',
+    'external-blocker', 'emergency-pivot', 'scope-flow',
+  ];
+  const CADENCE_MIN_DAYS = 3;
+
+  function cadParseIsoDateUTC(s) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || '').trim());
+    if (!m) return null;
+    const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+    return isNaN(d.getTime()) ? null : d;
+  }
+  function cadIsoOf(d) { return d.toISOString().split('T')[0]; }
+  function cadDaysBetween(a, b) { return Math.round((b - a) / 86400000); }
+  function cadTodayIso() { return new Date().toISOString().split('T')[0]; }
+
+  function cadNowIsoOffsetIST() {
+    // Mirror Python now_iso_offset(): IST +05:30 wall-clock, +05:30 suffix.
+    const d = new Date(Date.now() + (5 * 60 + 30) * 60000);
+    const p = n => String(n).padStart(2, '0');
+    return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}T` +
+           `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}+05:30`;
+  }
+
+  function cadEscapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+  function cadExtractScalar(fmText, field) {
+    // Mirror Python extract_field(): single-line scalar, tolerate inline comment.
+    const re = new RegExp(`^${cadEscapeRe(field)}:\\s*(.+?)\\s*(?:#.*)?$`, 'm');
+    const m = re.exec(fmText);
+    return m ? m[1].trim() : null;
+  }
+  function cadReplaceScalar(fmText, field, newValue) {
+    // Mirror Python replace_field(): replace value, preserve inline comment, count=1.
+    const re = new RegExp(`^(${cadEscapeRe(field)}:\\s*)(\\S+)(\\s*(?:#.*)?)$`, 'm');
+    return fmText.replace(re, `$1${newValue}$3`);
+  }
+
+  function cadRenderHistoryEntry(e) {
+    // Byte-for-byte mirror of Python render_history_entry() indentation.
+    const rcYaml = e.reasonClassList.join(', ');
+    const lines = [
+      '  - direction: ' + e.direction,
+      `    from_end_date: ${e.fromEnd}`,
+      `    to_end_date:   ${e.toEnd}`,
+      `    from_cadence:  ${e.fromCad}d`,
+      `    to_cadence:    ${e.toCad}d`,
+      `    delta_days:    ${e.delta > 0 ? '+' : ''}${e.delta}`,
+      `    reason_class:  [${rcYaml}]`,
+      `    reason_text:   "${e.reasonText}"`,
+      `    ratified_by:   ${e.ratifiedBy}`,
+      `    session:       ${e.session}`,
+      `    timestamp:     ${e.timestamp}`,
+    ];
+    if (e.scopePlan) lines.push(`    scope_plan:    ${e.scopePlan}`);
+    return lines.join('\n');
+  }
+
+  function cadInsertOrAppendHistory(fmText, entryYaml) {
+    // Mirror Python insert_or_append_extension_history().
+    if (/^extension_history:/m.test(fmText)) {
+      const lines = fmText.split('\n');
+      const out = [];
+      let i = 0, appended = false;
+      while (i < lines.length) {
+        out.push(lines[i]);
+        if (!appended && lines[i].startsWith('extension_history:')) {
+          let j = i + 1;
+          while (j < lines.length && (lines[j].startsWith('  ') || lines[j].trim() === '')) {
+            out.push(lines[j]); j++;
+          }
+          out.push(entryYaml);
+          i = j; appended = true;
+          continue;
+        }
+        i++;
+      }
+      return out.join('\n');
+    }
+    return fmText.replace(/\s+$/, '') + '\n' + 'extension_history:\n' + entryYaml + '\n';
+  }
+
+  // Read-only parse of extension_history[] entries for the modal's history view.
+  function cadParseHistory(rawText) {
+    const fmMatch = /^---\r?\n([\s\S]*?)\r?\n---/.exec(rawText);
+    if (!fmMatch) return [];
+    const lines = fmMatch[1].split(/\r?\n/);
+    let i = lines.findIndex(l => /^extension_history:/.test(l));
+    if (i < 0) return [];
+    const entries = [];
+    let cur = null;
+    for (i = i + 1; i < lines.length; i++) {
+      const l = lines[i];
+      if (!(l.startsWith('  ') || l.trim() === '')) break;  // block ended
+      const dirM = /^\s+-\s+direction:\s*(\S+)/.exec(l);
+      if (dirM) { cur = { direction: dirM[1] }; entries.push(cur); continue; }
+      if (!cur) continue;
+      const kv = /^\s+([a-z_]+):\s*(.*)$/.exec(l);
+      if (kv) cur[kv[1]] = kv[2].replace(/^"|"$/g, '').trim();
+    }
+    return entries;
+  }
+
+  // Core: given the raw SP file text + inputs, return the new file text + a summary,
+  // or throw an Error whose .message is user-facing (mirrors the SOP invariants).
+  function cadComputeEdit(rawText, opts) {
+    const fmMatch = /^---\n([\s\S]*?)\n---/.exec(rawText);
+    if (!fmMatch) throw new Error('Sprint file has no YAML frontmatter.');
+    const fmText = fmMatch[1];
+    const rest = rawText.slice(fmMatch[0].length);
+
+    const startStr = cadExtractScalar(fmText, 'start_date') || cadExtractScalar(fmText, 'start');
+    if (!startStr) throw new Error('Frontmatter is missing start_date.');
+    const startD = cadParseIsoDateUTC(startStr);
+    if (!startD) throw new Error(`Unparseable start_date: ${startStr}`);
+    const newEndD = cadParseIsoDateUTC(opts.newEnd);
+    if (!newEndD) throw new Error(`Pick a valid new end date (got ${opts.newEnd || 'nothing'}).`);
+
+    const curEndStr = cadExtractScalar(fmText, 'end_date') || cadExtractScalar(fmText, 'end');
+    const oldEndD = cadParseIsoDateUTC(curEndStr);
+    if (!oldEndD) throw new Error(`Unparseable current end_date: ${curEndStr}`);
+    if (+oldEndD === +newEndD) throw new Error(`New end date equals current end_date (${curEndStr}) — nothing to change.`);
+
+    const oldCad = cadDaysBetween(startD, oldEndD) + 1;
+    const newCad = cadDaysBetween(startD, newEndD) + 1;
+    const delta = cadDaysBetween(oldEndD, newEndD);
+    const direction = delta > 0 ? 'extend' : 'shorten';
+
+    if (+newEndD <= +startD) throw new Error(`End date must be after the start date (${startStr}).`);
+    if (newCad < CADENCE_MIN_DAYS) throw new Error(`New cadence ${newCad}d is below the ${CADENCE_MIN_DAYS}-day floor — close or convert the sprint instead of shortening.`);
+    const todayD = cadParseIsoDateUTC(cadTodayIso());
+    if (direction === 'shorten' && +newEndD < +todayD) throw new Error(`Can't shorten to a past date (${opts.newEnd} is before today ${cadTodayIso()}).`);
+
+    if (!opts.reasonClassList || opts.reasonClassList.length === 0) throw new Error('Pick at least one reason class.');
+    for (const rc of opts.reasonClassList) {
+      if (!CADENCE_REASON_ENUM.includes(rc)) throw new Error(`Unknown reason class: ${rc}`);
+    }
+    if (!opts.reasonText || !opts.reasonText.trim()) throw new Error('Add a one–two sentence reason.');
+    // YAML-safety: reason_text is emitted inside a double-quoted scalar. Collapse
+    // newlines and neutralise embedded double-quotes so the file stays parseable
+    // (the Python SOP relies on the caller not doing this; the UI must be safe).
+    const safeReason = opts.reasonText.trim().replace(/\s*\r?\n\s*/g, ' ').replace(/"/g, "'");
+
+    const entryYaml = cadRenderHistoryEntry({
+      direction, fromEnd: cadIsoOf(oldEndD), toEnd: cadIsoOf(newEndD),
+      fromCad: oldCad, toCad: newCad, delta,
+      reasonClassList: opts.reasonClassList, reasonText: safeReason,
+      ratifiedBy: opts.ratifiedBy, session: opts.session, timestamp: cadNowIsoOffsetIST(),
+    });
+
+    let newFm = fmText;
+    newFm = cadReplaceScalar(newFm, 'end_date', cadIsoOf(newEndD));
+    newFm = cadReplaceScalar(newFm, 'cadence', `${newCad}d`);
+    newFm = cadInsertOrAppendHistory(newFm, entryYaml);
+    const newText = '---\n' + newFm + '\n---' + rest;
+
+    return { newText, direction, oldEndIso: cadIsoOf(oldEndD), newEndIso: cadIsoOf(newEndD), oldCad, newCad, delta };
+  }
+
+  async function writeSprintCadence(opts) {
+    // SHA-guarded writeback to the ACTIVE SPRINT BRANCH (D136 — SP file lives there).
+    const s = state.activeSprint;
+    if (!s) throw new Error('No active sprint loaded.');
+    const branch = s.branch;
+    const sprintFile = s.sprintFile;
+    if (!sprintFile) throw new Error('Could not resolve the active sprint filename.');
+    const path = `docs/sprints/${sprintFile}`;
+    const latest = await Repos.getFileWithSha(CONFIG.username, state.backlogRepo, path, branch);
+    if (!latest) throw new Error(`Could not fetch ${path} on ${branch}.`);
+    const { newText, direction, oldEndIso, newEndIso, oldCad, newCad, delta } =
+      cadComputeEdit(latest.content, opts);
+    if (newText === latest.content) {
+      const err = new Error('No change produced.'); err.code = 'empty_commit_guard'; throw err;
+    }
+    const rcJoined = opts.reasonClassList.join(',');
+    const message =
+      `data(${opts.session}-#188) ${direction} Sprint cadence ${oldCad}d -> ${newCad}d (${rcJoined})\n\n` +
+      `${opts.reasonText.trim()}\n\n` +
+      `Ratified by ${opts.ratifiedBy}; appended to ${sprintFile} extension_history[].\n` +
+      `Mechanism: Sprint Dashboard cadence modal (#188, mirrors scripts/adjust_sprint_cadence.py).`;
+    const result = await Repos.putFile(
+      CONFIG.username, state.backlogRepo, path, newText, latest.sha, message, branch
+    );
+    return { result, direction, oldEndIso, newEndIso, oldCad, newCad, delta };
   }
 
   async function writeBacklogField(reason) {
@@ -1973,6 +2727,18 @@ window.BacklogView = (() => {
     if (!latest) throw new Error('Could not fetch BACKLOG.md SHA');
     state.backlogSha = latest.sha;
     const newMd = rebuildBacklogMd(latest.content);
+    // #134 t3 empty-commit guard (client-side) — suppress no-op writeback
+    // (e.g. same-column status drag). This path PUTs via GitHub API, which
+    // bypasses the pre-commit empty-writeback hook, so the client guard is the
+    // only net. Mirrors writeBacklogUpdate. Origin: S115 master-sync sp1 —
+    // empty commits 45b38f2 + 0d9cf16 ("status") reached origin/master via
+    // this one uncovered writeback function.
+    if (newMd === latest.content) {
+      pushToast({ kind: 'warning', icon: '⚠', msg: `No changes to save (${reason} unchanged)`, ttl: 3000 });
+      const err = new Error('no-op writeback suppressed — content unchanged');
+      err.code = 'empty_commit_guard';
+      throw err;
+    }
     const result = await Repos.putFile(
       CONFIG.username, state.backlogRepo, state.backlogPath,
       newMd, latest.sha,
@@ -1982,10 +2748,685 @@ window.BacklogView = (() => {
     return result;
   }
 
+  async function writeBacklogCreate(newItem) {
+    // Full-row create: append new row to BACKLOG.md + add item to state (t2 #134)
+    const latest = await Repos.getFileWithSha(CONFIG.username, state.backlogRepo, state.backlogPath);
+    if (!latest) throw new Error('Could not fetch BACKLOG.md SHA');
+    state.backlogSha = latest.sha;
+    // ID guard: state.items may come from sprint branch (lower max ID than master).
+    // Re-derive correct next ID from the live master content we just fetched (#134 t7 fix).
+    const masterItems = parseBacklog(latest.content);
+    const masterMax = Math.max(0, ...masterItems.map(i => parseInt(i.id, 10) || 0));
+    const staleId = parseInt(newItem.id, 10) || 0;
+    if (staleId <= masterMax) {
+      newItem.id = String(masterMax + 1);
+    }
+    // Add to state.items so subsequent renders reflect the new item
+    state.items.push(newItem);
+    const newMd = rebuildBacklogMd(latest.content, { appendRow: newItem });
+    // #134 t3 empty-commit guard (client-side) — should never be same for create, but guard defensively
+    if (newMd === latest.content) throw new Error('empty-commit guard: no diff produced (new row not appended)');
+    const result = await Repos.putFile(
+      CONFIG.username, state.backlogRepo, state.backlogPath,
+      newMd, latest.sha,
+      `Backlog 2.0 writeback (create #${newItem.id}) — autonomous via UI`
+    );
+    state.backlogSha = result.sha;
+    // Create detail file on sprint branch for D141 sprintMembership (best-effort)
+    if (newItem.sprint) {
+      createMinimalDetailFile(newItem).catch(e =>
+        console.warn(`[#134] detail file create for #${newItem.id} failed (non-fatal):`, e.message)
+      );
+    }
+    return result;
+  }
+
+  async function writeBacklogUpdate(id, updates) {
+    // Full-row update: apply updates to state then rebuild (t2 #134)
+    const item = state.items.find(i => i.id === id);
+    if (!item) throw new Error(`Item #${id} not found in state`);
+    // Apply updates before rebuild so rebuildBacklogMd picks them up
+    Object.assign(item, updates);
+    const latest = await Repos.getFileWithSha(CONFIG.username, state.backlogRepo, state.backlogPath);
+    if (!latest) throw new Error('Could not fetch BACKLOG.md SHA');
+    state.backlogSha = latest.sha;
+    const newMd = rebuildBacklogMd(latest.content);
+    // #134 t3 empty-commit guard (client-side) — skip PUT + log if no actual diff
+    if (newMd === latest.content) {
+      pushToast({ kind: 'warning', icon: '⚠', msg: `#${id}: no changes to save (values unchanged)`, ttl: 3000 });
+      const err = new Error('no-op writeback suppressed — content unchanged');
+      err.code = 'empty_commit_guard';
+      throw err;
+    }
+    const result = await Repos.putFile(
+      CONFIG.username, state.backlogRepo, state.backlogPath,
+      newMd, latest.sha,
+      `Backlog 2.0 writeback (update #${id}) — autonomous via UI`
+    );
+    state.backlogSha = result.sha;
+    return result;
+  }
+
+  async function writeBacklogDelete(id) {
+    // Remove row from BACKLOG.md (rebuildBacklogMd with deleteId skips that row)
+    const latest = await Repos.getFileWithSha(CONFIG.username, state.backlogRepo, state.backlogPath);
+    if (!latest) throw new Error('Could not fetch BACKLOG.md SHA');
+    state.backlogSha = latest.sha;
+    const newMd = rebuildBacklogMd(latest.content, { deleteId: String(id) });
+    if (newMd === latest.content) throw new Error('Delete produced no diff — item may not be in the backlog table');
+    const result = await Repos.putFile(
+      CONFIG.username, state.backlogRepo, state.backlogPath,
+      newMd, latest.sha,
+      `Backlog 2.0 writeback (delete #${id}) — autonomous via UI`
+    );
+    state.backlogSha = result.sha;
+    // Remove from local state AFTER successful write
+    const idx = state.items.findIndex(i => i.id === String(id));
+    if (idx !== -1) state.items.splice(idx, 1);
+    return result;
+  }
+
+  async function createMinimalDetailFile(newItem) {
+    // Create docs/backlog-detail/<id>.md on sprint branch so D141 sprintMembership picks up the card
+    if (!newItem.sprint) return;
+    const sprintBranch = state.activeSprint && state.activeSprint.branch;
+    const filePath = `docs/backlog-detail/${newItem.id}.md`;
+    // Check if file already exists (avoid overwrite)
+    const existing = await Repos.getFileWithSha(CONFIG.username, state.backlogRepo, filePath, sprintBranch || undefined).catch(() => null);
+    if (existing) return; // file exists, skip creation
+    const safeName = String(newItem.name || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    const content = [
+      '---',
+      `id: ${newItem.id}`,
+      `backlog_ref: ${newItem.id}`,
+      `title: "${safeName}"`,
+      `status: candidate`,
+      `sprint: ${newItem.sprint}`,
+      `priority: ${newItem.priority || 'Medium'}`,
+      'schema_version: 2',
+      '---',
+      '',
+      `# ${newItem.name}`,
+      '',
+      '_Created via UI form._',
+      '',
+    ].join('\n');
+    await Repos.putFile(
+      CONFIG.username, state.backlogRepo, filePath,
+      content, undefined, // no sha → create new file
+      `data(#134): create card #${newItem.id} detail file — autonomous via UI`,
+      sprintBranch || 'master'
+    );
+  }
+
+  async function upsertDetailFileSprint(cardId, newSprint) {
+    // Update (or create) the sprint: field in docs/backlog-detail/<id>.md
+    const sprintBranch = state.activeSprint && state.activeSprint.branch;
+    const filePath = `docs/backlog-detail/${cardId}.md`;
+    const latest = await Repos.getFileWithSha(CONFIG.username, state.backlogRepo, filePath, sprintBranch || undefined).catch(() => null);
+    if (!latest) {
+      // No detail file — create one if sprint is being set
+      if (!newSprint) return;
+      const item = state.items.find(i => i.id === String(cardId)) || {};
+      await createMinimalDetailFile({ ...item, id: cardId, sprint: newSprint });
+      return;
+    }
+    // Line-by-line sprint field update inside frontmatter
+    const lines = latest.content.split('\n');
+    let fmOpen = -1, fmClose = -1, sprintLine = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].trim() === '---') {
+        if (fmOpen === -1) { fmOpen = i; continue; }
+        fmClose = i; break;
+      }
+      if (fmOpen !== -1 && /^sprint:\s*/.test(lines[i])) { sprintLine = i; }
+    }
+    if (sprintLine !== -1) {
+      if (newSprint) lines[sprintLine] = `sprint: ${newSprint}`;
+      else lines.splice(sprintLine, 1);
+    } else if (newSprint && fmClose !== -1) {
+      lines.splice(fmClose, 0, `sprint: ${newSprint}`);
+    } else {
+      return; // nothing to do
+    }
+    const newMd = lines.join('\n');
+    if (newMd === latest.content) return;
+    await Repos.putFile(
+      CONFIG.username, state.backlogRepo, filePath,
+      newMd, latest.sha,
+      `data(#134): update sprint on #${cardId} → ${newSprint || 'none'} — autonomous via UI`,
+      sprintBranch || 'master'
+    );
+  }
+
+  // ── CRUD modal (t2/t4 #134) ────────────────────
+
+  function flipTodoStatusInMd(md, todoId, newStatus) {
+    // Line-by-line todo status flip — finds `  - id: <todoId>` block, replaces `    status: *`
+    const lines = md.split('\n');
+    const result = [];
+    let inTargetTodo = false;
+    let changed = false;
+    for (const line of lines) {
+      if (!inTargetTodo) {
+        const m = line.match(/^(\s{2}-\s+id:\s*)(\S+)/);
+        if (m) inTargetTodo = (m[2] === todoId);
+        result.push(line);
+      } else {
+        if (/^\s{4}status:\s+\S/.test(line)) {
+          result.push(line.replace(/^(\s{4}status:\s+)\S.*$/, `$1${newStatus}`));
+          changed = true;
+          inTargetTodo = false;
+        } else if (/^\s{2}-\s+id:\s+\S/.test(line)) {
+          // Hit next todo before finding status — passthrough
+          const m = line.match(/^(\s{2}-\s+id:\s*)(\S+)/);
+          if (m) inTargetTodo = (m[2] === todoId);
+          result.push(line);
+        } else {
+          result.push(line);
+        }
+      }
+    }
+    return { md: result.join('\n'), changed };
+  }
+
+  async function loadCardTodos(cardId) {
+    const cardPath = `docs/backlog-detail/${cardId}.md`;
+    try {
+      const md = await Repos.getFile(CONFIG.username, state.backlogRepo, cardPath);
+      if (!md) return [];
+      const fm = parseFrontmatter(md);
+      const raw = fm && fm.todos;
+      // Capture sprint field into crudModal while we have the detail file (#134)
+      if (state.crudModal && fm && fm.sprint != null) state.crudModal.sprint = String(fm.sprint);
+      if (!Array.isArray(raw)) return [];
+      return raw.filter(t => t && t.id).map(t => ({
+        id: String(t.id), text: t.text || String(t.id), status: t.status || 'candidate'
+      }));
+    } catch { return []; }
+  }
+
+  async function handleTodoFlip(container, cardId, todoId, newChecked) {
+    const newStatus = newChecked ? 'done' : 'candidate';
+    // Optimistic UI update
+    if (state.crudModal && state.crudModal.todos) {
+      const t = state.crudModal.todos.find(x => x.id === todoId);
+      if (t) { t.status = newStatus; fullRender(container); }
+    }
+    saveStart();
+    try {
+      const cardPath = `docs/backlog-detail/${cardId}.md`;
+      const latest = await Repos.getFileWithSha(CONFIG.username, state.backlogRepo, cardPath);
+      if (!latest) throw new Error(`Could not fetch card #${cardId}`);
+      const { md: newMd, changed } = flipTodoStatusInMd(latest.content, todoId, newStatus);
+      if (!changed) throw new Error(`Todo ${todoId} not found in #${cardId}`);
+      await Repos.putFile(
+        CONFIG.username, state.backlogRepo, cardPath,
+        newMd, latest.sha,
+        `Backlog 2.0 writeback (todo-flip #${cardId} ${todoId}=${newStatus}) — autonomous via UI`
+      );
+      pushToast({ kind: 'success', msg: `${todoId} → ${newStatus}`, ttl: 1500 });
+    } catch (e) {
+      // Revert optimistic update
+      if (state.crudModal && state.crudModal.todos) {
+        const t = state.crudModal.todos.find(x => x.id === todoId);
+        if (t) { t.status = newChecked ? 'candidate' : 'done'; fullRender(container); }
+      }
+      pushToast({ kind: 'danger', icon: '⚠', msg: `Todo save failed: ${e.message}`, ttl: 4000 });
+    } finally { saveEnd(); }
+  }
+
+  function openCrudModal(container, mode, item) {
+    if (state.crudModal && state.crudModal._escHandler) {
+      document.removeEventListener('keydown', state.crudModal._escHandler);
+    }
+    const escHandler = e => { if (e.key === 'Escape') closeCrudModal(container); };
+    state.crudModal = {
+      mode, item: item || null,
+      todos: [], todosLoading: mode === 'edit',
+      sprint: null,   // loaded async alongside todos in edit mode
+      saving: false, errorMsg: null, _escHandler: escHandler
+    };
+    document.addEventListener('keydown', escHandler);
+    fullRender(container);
+    if (mode === 'edit' && item) {
+      loadCardTodos(item.id).then(todos => {
+        if (!state.crudModal) return;
+        state.crudModal.todos = todos;
+        state.crudModal.todosLoading = false;
+        fullRender(container);
+      }).catch(() => {
+        if (!state.crudModal) return;
+        state.crudModal.todosLoading = false;
+        fullRender(container);
+      });
+    }
+    setTimeout(() => {
+      const el = document.getElementById(mode === 'create' ? 'bl-crud-products' : 'bl-crud-name');
+      if (el) el.focus();
+    }, 30);
+  }
+
+  function closeCrudModal(container) {
+    if (state.crudModal && state.crudModal._escHandler) {
+      document.removeEventListener('keydown', state.crudModal._escHandler);
+    }
+    state.crudModal = null;
+    fullRender(container);
+  }
+
+  async function submitCrudModal(container) {
+    if (!state.crudModal || state.crudModal.saving) return;
+    const { mode, item } = state.crudModal;
+    const prodEl    = document.getElementById('bl-crud-products');
+    const nameEl    = document.getElementById('bl-crud-name');
+    const prioEl    = document.getElementById('bl-crud-priority');
+    const statusEl  = document.getElementById('bl-crud-status');
+    const stypeEl   = document.getElementById('bl-crud-sessiontype');
+    const sprintEl  = document.getElementById('bl-crud-sprint');
+    if (!nameEl || !nameEl.value.trim()) {
+      state.crudModal.errorMsg = 'Name is required.'; fullRender(container); return;
+    }
+    if (!prodEl || !prodEl.value.trim()) {
+      state.crudModal.errorMsg = 'Product is required.'; fullRender(container); return;
+    }
+    const sprint = sprintEl && !sprintEl.readOnly ? sprintEl.value : (state.crudModal.sprint || '');
+    const updates = {
+      products: prodEl.value.split(',').map(p => p.trim()).filter(Boolean),
+      name:      nameEl.value.trim(),
+      priority:  prioEl  ? prioEl.value  : 'Medium',
+      status:    statusEl ? statusEl.value : 'Open',
+      sessionType: stypeEl ? stypeEl.value : '—',
+    };
+    state.crudModal.saving = true;
+    state.crudModal.errorMsg = null;
+    fullRender(container);
+    saveStart();
+    try {
+      if (mode === 'create') {
+        const idEl = document.getElementById('bl-crud-id');
+        const newId = idEl ? idEl.value : String(Math.max(0, ...state.items.map(i => parseInt(i.id,10)||0)) + 1);
+        const newItem = { id: newId, ...updates, sprint: sprint || null, type: '—', phase: '—', aiTool: '—', rank: null, reason: null, customReason: null };
+        await writeBacklogCreate(newItem); // createMinimalDetailFile called internally if sprint set
+        // Sprint filter visibility after create (#134 t7 fix — sprintMembership map is loaded at render
+        // time so the new card is never in it; legacyUnion also excludes it → filter always hides it).
+        // Fix: if card is explicitly for the active sprint, inject into sprintMembership so inCurrent=true.
+        // Otherwise widen filter to 'All sprints' so the card is visible.
+        if (state.sprintFilter === 'Current') {
+          const activeId = state.activeSprint && state.activeSprint.id;
+          if (newItem.sprint && activeId && newItem.sprint === activeId &&
+              state.activeSprint && state.activeSprint.sprintMembership) {
+            state.activeSprint.sprintMembership.set(String(newItem.id), newItem.sprint);
+          } else {
+            state.sprintFilter = 'All sprints';
+            pushFilterToHash();
+          }
+        }
+        pushToast({ kind: 'success', msg: `#${newItem.id} added${sprint ? ` to ${sprint}` : ' to backlog'}`, ttl: 3000 });
+      } else {
+        await writeBacklogUpdate(item.id, updates);
+        // Update detail file sprint if changed (best-effort)
+        const oldSprint = state.crudModal.sprint || '';
+        if (sprint !== oldSprint) {
+          upsertDetailFileSprint(item.id, sprint).catch(e =>
+            console.warn(`[#134] sprint upsert for #${item.id} failed (non-fatal):`, e.message)
+          );
+        }
+        pushToast({ kind: 'success', msg: `#${item.id} updated`, ttl: 2000 });
+      }
+      if (state.crudModal && state.crudModal._escHandler) {
+        document.removeEventListener('keydown', state.crudModal._escHandler);
+      }
+      state.crudModal = null;
+      fullRender(container);
+    } catch (e) {
+      state.crudModal.saving = false;
+      state.crudModal.errorMsg = e.code === 'sha_conflict'
+        ? 'Conflict — someone else edited this. Close and reload.'
+        : `Save failed: ${e.message}`;
+      fullRender(container);
+      pushToast({ kind: 'danger', icon: '⚠', msg: state.crudModal.errorMsg, ttl: 5000 });
+    } finally { saveEnd(); }
+  }
+
+  function renderCrudModal() {
+    const m = state.crudModal;
+    if (!m) return '';
+    const isCreate = m.mode === 'create';
+    const item = m.item;
+
+    // ID: show 'auto' for create (assigned from live master at write time; sprint-branch state is stale)
+    const nextId = isCreate ? 'auto' : item.id;
+
+    // Product datalist
+    const prodOpts = state.products.map(p => `<option value="${escHtml(p)}">`).join('');
+
+    // Priority options with P-level labels
+    const priMap = { 'SUPER HIGH': 'P0 – SUPER HIGH (critical)', 'HIGH': 'P1 – HIGH (sprint-committed)', 'Medium': 'P2 – Medium (queue)', 'Low': 'P3 – Low (someday)' };
+    const priorityOpts = ['SUPER HIGH','HIGH','Medium','Low'].map(p =>
+      `<option value="${escHtml(p)}"${!isCreate && item.priority === p ? ' selected' : (isCreate && p === 'HIGH' ? ' selected' : '')}>${escHtml(priMap[p] || p)}</option>`
+    ).join('');
+
+    const statusList = ['Open','In Progress ▶','Blocked ⏸','Done ✓'];
+    const statusOpts = statusList.map(s =>
+      `<option value="${escHtml(s)}"${!isCreate && item.status === s ? ' selected' : (isCreate && s === 'Open' ? ' selected' : '')}>${escHtml(s)}</option>`
+    ).join('');
+
+    const stList = ['—','Hygiene fix','Prod build','Infra build','Biz enablement','Personal build'];
+    const stOpts = stList.map(s =>
+      `<option value="${escHtml(s)}"${!isCreate && item.sessionType === s ? ' selected' : ''}>${escHtml(s)}</option>`
+    ).join('');
+
+    // Sprint field — dropdown in create mode, read-only in edit mode (sprint loaded async with todos)
+    const curSprintId = state.activeSprint && state.activeSprint.id;
+    const sprintVal = isCreate ? (curSprintId || '') : (m.sprint || '');
+    const sprintOpts = [
+      `<option value=""${sprintVal === '' ? ' selected' : ''}>— no sprint</option>`,
+      curSprintId ? `<option value="${escHtml(curSprintId)}"${sprintVal === curSprintId ? ' selected' : ''}>${escHtml(curSprintId)}</option>` : '',
+    ].join('');
+
+    // Todos sub-panel (edit mode, t4 #134)
+    let todosHtml = '';
+    if (!isCreate) {
+      if (m.todosLoading) {
+        todosHtml = `<details class="bl-crud-todos"><summary class="bl-crud-todos-sum">Todos</summary><div class="bl-crud-todos-body muted">Loading…</div></details>`;
+      } else if (m.todos && m.todos.length) {
+        const rows = m.todos.map(t => {
+          const isDoneT = t.status === 'done';
+          return `<label class="bl-crud-todo-row${isDoneT ? ' is-done' : ''}">
+            <input type="checkbox" class="bl-crud-todo-chk" data-card-id="${escHtml(item.id)}" data-todo-id="${escHtml(t.id)}" ${isDoneT ? 'checked' : ''} />
+            <span class="bl-crud-todo-text">${inline(t.text)}</span>
+            <span class="bl-crud-todo-st muted">${escHtml(t.id)}</span>
+          </label>`;
+        }).join('');
+        todosHtml = `<details class="bl-crud-todos"><summary class="bl-crud-todos-sum">Todos <span class="bl-crud-todos-ct">${m.todos.length}</span></summary><div class="bl-crud-todos-body">${rows}</div></details>`;
+      } else {
+        todosHtml = `<details class="bl-crud-todos"><summary class="bl-crud-todos-sum">Todos</summary><div class="bl-crud-todos-body muted">No todos found for this card.</div></details>`;
+      }
+    }
+
+    const errHtml = m.errorMsg ? `<div class="bl-crud-error">${escHtml(m.errorMsg)}</div>` : '';
+
+    return `<div class="bl-crud-overlay" id="bl-crud-overlay">
+      <div class="bl-crud-modal" role="dialog" aria-label="${isCreate ? 'Add backlog item' : 'Edit #' + escHtml(item.id)}">
+        <div class="bl-crud-head">
+          <span class="bl-crud-title">${isCreate ? 'Add backlog item' : 'Edit #' + escHtml(item.id)}</span>
+          <button class="bl-crud-x" id="bl-crud-close" type="button" title="Close (Esc)">✕</button>
+        </div>
+        <div class="bl-crud-body">
+          <div class="bl-crud-row2">
+            <div class="bl-crud-field">
+              <label class="bl-crud-lbl">ID</label>
+              <input class="bl-crud-inp" id="bl-crud-id" value="${escHtml(nextId)}" readonly tabindex="-1" />
+            </div>
+            <div class="bl-crud-field bl-crud-field-grow">
+              <label class="bl-crud-lbl">Product <span class="bl-crud-req" title="required">*</span></label>
+              <input class="bl-crud-inp" id="bl-crud-products" list="bl-crud-prodlist"
+                value="${isCreate ? '' : escHtml((item.products||[]).join(', '))}"
+                placeholder="vprohub, exec-profile…" autocomplete="off" />
+              <datalist id="bl-crud-prodlist">${prodOpts}</datalist>
+            </div>
+          </div>
+          <div class="bl-crud-field">
+            <label class="bl-crud-lbl">Name <span class="bl-crud-req" title="required">*</span></label>
+            <input class="bl-crud-inp" id="bl-crud-name"
+              value="${isCreate ? '' : escHtml(item.name)}"
+              placeholder="Short descriptive title" />
+          </div>
+          <div class="bl-crud-row2">
+            <div class="bl-crud-field">
+              <label class="bl-crud-lbl">Priority <span class="bl-crud-req" title="required">*</span>
+                <span class="bl-crud-tip" title="P0=SUPER HIGH (critical blocker), P1=HIGH (sprint-committed), P2=Medium (queue), P3=Low (someday/stretch)">ⓘ</span>
+              </label>
+              <select class="bl-crud-sel" id="bl-crud-priority">${priorityOpts}</select>
+            </div>
+            <div class="bl-crud-field">
+              <label class="bl-crud-lbl">Status <span class="bl-crud-req" title="required">*</span></label>
+              <select class="bl-crud-sel" id="bl-crud-status">${statusOpts}</select>
+            </div>
+          </div>
+          <div class="bl-crud-field">
+            <label class="bl-crud-lbl">Session Class</label>
+            <select class="bl-crud-sel" id="bl-crud-sessiontype">${stOpts}</select>
+          </div>
+          <div class="bl-crud-field">
+            <label class="bl-crud-lbl">Sprint
+              <span class="bl-crud-tip" title="Assign to current sprint — creates a detail file so the card appears in Sprint Dashboard">ⓘ</span>
+            </label>
+            ${isCreate
+              ? `<select class="bl-crud-sel" id="bl-crud-sprint">${sprintOpts}</select>`
+              : `<input class="bl-crud-inp" id="bl-crud-sprint" value="${escHtml(m.sprint || (m.todosLoading ? 'loading…' : '—'))}" readonly tabindex="-1" />`
+            }
+          </div>
+          ${todosHtml}
+          ${errHtml}
+        </div>
+        <div class="bl-crud-foot">
+          <button class="bl-crud-cancel-btn" id="bl-crud-cancel" type="button">Cancel</button>
+          <button class="bl-crud-save-btn${m.saving ? ' bl-crud-saving' : ''}" id="bl-crud-save" type="button" ${m.saving ? 'disabled' : ''}>
+            ${m.saving ? '…saving' : (isCreate ? 'Add item' : 'Save changes')}
+          </button>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  // ── #188 — Cadence modal (open / close / submit / render) ──────
+
+  function openCadenceModal(container) {
+    if (isReadOnly()) return;
+    const s = state.activeSprint;
+    if (!s) return;
+    if (state.cadenceModal && state.cadenceModal._escHandler) {
+      document.removeEventListener('keydown', state.cadenceModal._escHandler);
+    }
+    const escHandler = e => { if (e.key === 'Escape') closeCadenceModal(container); };
+    state.cadenceModal = {
+      loading: true, raw: null, sha: null,
+      start: null, end: null, cad: null, history: [],
+      reasonClasses: new Set(), saving: false, errorMsg: null, _escHandler: escHandler,
+    };
+    document.addEventListener('keydown', escHandler);
+    fullRender(container);
+
+    const branch = s.branch;
+    const sprintFile = s.sprintFile;
+    const path = `docs/sprints/${sprintFile}`;
+    Repos.getFileWithSha(CONFIG.username, state.backlogRepo, path, branch)
+      .then(latest => {
+        if (!state.cadenceModal) return;
+        if (!latest) throw new Error(`Could not fetch ${path} on ${branch}.`);
+        const raw = latest.content;
+        state.cadenceModal.raw = raw;
+        state.cadenceModal.sha = latest.sha;
+        const fmM = /^---\n([\s\S]*?)\n---/.exec(raw);
+        const fm = fmM ? fmM[1] : '';
+        state.cadenceModal.start = cadExtractScalar(fm, 'start_date') || cadExtractScalar(fm, 'start');
+        state.cadenceModal.end   = cadExtractScalar(fm, 'end_date')   || cadExtractScalar(fm, 'end');
+        state.cadenceModal.cad   = cadExtractScalar(fm, 'cadence');
+        state.cadenceModal.history = cadParseHistory(raw);
+        state.cadenceModal.loading = false;
+        fullRender(container);
+        setTimeout(() => { const el = document.getElementById('bl-cad-newend'); if (el) el.focus(); }, 30);
+      })
+      .catch(err => {
+        if (!state.cadenceModal) return;
+        state.cadenceModal.loading = false;
+        state.cadenceModal.errorMsg = `Load failed: ${err.message}`;
+        fullRender(container);
+      });
+  }
+
+  function closeCadenceModal(container) {
+    if (state.cadenceModal && state.cadenceModal._escHandler) {
+      document.removeEventListener('keydown', state.cadenceModal._escHandler);
+    }
+    state.cadenceModal = null;
+    fullRender(container);
+  }
+
+  // Live preview — recompute direction/cadence as the date changes, without re-render.
+  function updateCadencePreview(container) {
+    const m = state.cadenceModal;
+    if (!m || m.loading) return;
+    const prev = document.getElementById('bl-cad-preview');
+    if (!prev) return;
+    const newEnd = (document.getElementById('bl-cad-newend') || {}).value || '';
+    if (!newEnd || !m.raw) { prev.className = 'bl-cad-preview'; prev.textContent = 'Pick a new end date to preview the change.'; return; }
+    try {
+      const reasons = [...(m.reasonClasses || [])];
+      const r = cadComputeEdit(m.raw, {
+        newEnd, reasonClassList: reasons.length ? reasons : ['cadence-realignment'],
+        reasonText: 'preview', ratifiedBy: 'venkatesh', session: sessionIdGuess(),
+      });
+      const sign = r.delta > 0 ? '+' : '';
+      prev.className = `bl-cad-preview bl-cad-preview-${r.direction}`;
+      prev.textContent = `${r.direction.toUpperCase()} · end ${r.oldEndIso} → ${r.newEndIso} · cadence ${r.oldCad}d → ${r.newCad}d (${sign}${r.delta}d)`;
+    } catch (e) {
+      prev.className = 'bl-cad-preview bl-cad-preview-error';
+      prev.textContent = `⚠ ${e.message}`;
+    }
+  }
+
+  function sessionIdGuess() {
+    // The SESSION id isn't known to the browser; the SessionTimer doesn't carry it.
+    // Use a stable UI marker so the ledger row is attributable to a dashboard action.
+    return 'UI';
+  }
+
+  async function submitCadenceModal(container) {
+    const m = state.cadenceModal;
+    if (!m || m.saving || m.loading) return;
+    const newEnd = (document.getElementById('bl-cad-newend') || {}).value || '';
+    const reasonText = (document.getElementById('bl-cad-reasontext') || {}).value || '';
+    const reasons = [...(m.reasonClasses || [])];
+    const opts = { newEnd, reasonClassList: reasons, reasonText, ratifiedBy: 'venkatesh', session: sessionIdGuess() };
+
+    // Client-side validate first (same errors the write would throw) so we never
+    // fire a doomed PUT.
+    try {
+      if (!m.raw) throw new Error('Sprint file not loaded yet.');
+      cadComputeEdit(m.raw, opts);
+    } catch (e) {
+      m.errorMsg = e.message; fullRender(container);
+      const el = document.getElementById('bl-cad-newend'); if (el) el.focus();
+      return;
+    }
+
+    m.saving = true; m.errorMsg = null; fullRender(container);
+    saveStart();
+    try {
+      const { direction, oldEndIso, newEndIso, oldCad, newCad } = await writeSprintCadence(opts);
+      // Invalidate ActiveSprint cache so the band re-renders with fresh dates.
+      if (window.ActiveSprint && typeof window.ActiveSprint.invalidateCache === 'function') {
+        window.ActiveSprint.invalidateCache(CONFIG.username, state.backlogRepo);
+      }
+      if (m._escHandler) document.removeEventListener('keydown', m._escHandler);
+      state.cadenceModal = null;
+      pushToast({ kind: 'success', msg: `Sprint ${direction}ed · ${oldEndIso}→${newEndIso} (${oldCad}d→${newCad}d)`, ttl: 4000 });
+      // Reload the sprint so the band reflects the new cadence.
+      try { state.activeSprint = await loadActiveSprint(); } catch {}
+      fullRender(container);
+    } catch (e) {
+      m.saving = false;
+      m.errorMsg = e.code === 'sha_conflict'
+        ? 'Conflict — the sprint file changed since you opened this. Close and reopen.'
+        : e.code === 'empty_commit_guard'
+          ? 'No change produced.'
+          : `Save failed: ${e.message}`;
+      fullRender(container);
+      pushToast({ kind: 'danger', icon: '⚠', msg: m.errorMsg, ttl: 5000 });
+    } finally { saveEnd(); }
+  }
+
+  function renderCadenceModal() {
+    const m = state.cadenceModal;
+    if (!m) return '';
+    const s = state.activeSprint;
+    const sprintId = (s && s.id) || '';
+
+    let bodyHtml;
+    if (m.loading) {
+      bodyHtml = `<div class="bl-cad-loading muted">Loading sprint file…</div>`;
+    } else if (m.raw == null) {
+      bodyHtml = `<div class="bl-crud-error">${escHtml(m.errorMsg || 'Could not load the sprint file.')}</div>`;
+    } else {
+      const reasonBoxes = CADENCE_REASON_ENUM.map(rc => {
+        const on = m.reasonClasses.has(rc);
+        return `<label class="bl-cad-reason${on ? ' is-on' : ''}">
+          <input type="checkbox" class="bl-cad-reason-chk" data-rc="${escAttr(rc)}" ${on ? 'checked' : ''} />
+          <span>${escHtml(rc)}</span>
+        </label>`;
+      }).join('');
+
+      const histRows = (m.history || []).length === 0
+        ? `<div class="bl-cad-hist-empty muted">No prior cadence changes.</div>`
+        : m.history.map(h => {
+            const dir = h.direction || '?';
+            return `<div class="bl-cad-hist-row bl-cad-hist-${escAttr(dir)}">
+              <span class="bl-cad-hist-dir">${escHtml(dir)}</span>
+              <span class="bl-cad-hist-dates">${escHtml(h.from_end_date || '?')} → ${escHtml(h.to_end_date || '?')}</span>
+              <span class="bl-cad-hist-meta muted">${escHtml((h.reason_class || '').replace(/[[\]]/g, ''))} · ${escHtml(h.session || '')} · ${escHtml((h.timestamp || '').split('T')[0])}</span>
+            </div>`;
+          }).join('');
+
+      const errHtml = m.errorMsg ? `<div class="bl-crud-error">${escHtml(m.errorMsg)}</div>` : '';
+      // Min for the date picker: shorten can't go before today, and end must be > start.
+      const minDate = m.start && m.start > cadTodayIso() ? m.start : cadTodayIso();
+
+      bodyHtml = `
+        <div class="bl-cad-current">
+          <span>Start <b>${escHtml(m.start || '?')}</b></span>
+          <span>End <b>${escHtml(m.end || '?')}</b></span>
+          <span>Cadence <b>${escHtml(m.cad || '?')}</b></span>
+        </div>
+        <div class="bl-crud-field">
+          <label class="bl-crud-lbl" for="bl-cad-newend">New end date <span class="bl-crud-req" title="required">*</span></label>
+          <input class="bl-crud-inp" type="date" id="bl-cad-newend" value="${escAttr(m.end || '')}" min="${escAttr(minDate)}" />
+        </div>
+        <div id="bl-cad-preview" class="bl-cad-preview">Pick a new end date to preview the change.</div>
+        <div class="bl-crud-field">
+          <label class="bl-crud-lbl">Reason class <span class="bl-crud-req" title="required">*</span>
+            <span class="bl-crud-tip" title="Why the cadence is changing — pick one or more. Mirrors the adjust_sprint_cadence.py enum.">ⓘ</span>
+          </label>
+          <div class="bl-cad-reasons">${reasonBoxes}</div>
+        </div>
+        <div class="bl-crud-field">
+          <label class="bl-crud-lbl" for="bl-cad-reasontext">Reason <span class="bl-crud-req" title="required">*</span></label>
+          <textarea class="bl-crud-inp bl-cad-textarea" id="bl-cad-reasontext" rows="2" placeholder="One–two sentences — becomes the extension_history[] reason_text.">${escHtml(m.reasonText || '')}</textarea>
+        </div>
+        <details class="bl-cad-hist"><summary class="bl-cad-hist-sum">Cadence history <span class="bl-cad-hist-ct">${(m.history || []).length}</span></summary>
+          <div class="bl-cad-hist-body">${histRows}</div>
+        </details>
+        <div class="bl-cad-note muted">Ratified by <b>venkatesh</b> (you hold the token). Writes to <span class="field-mono">${escHtml((s && s.branch) || '')}</span> and appends to <span class="field-mono">extension_history[]</span> — same invariant as the CLI SOP.</div>
+        ${errHtml}`;
+    }
+
+    const canSave = !m.loading && m.raw != null && !m.saving;
+    return `<div class="bl-crud-overlay" id="bl-cad-overlay">
+      <div class="bl-crud-modal bl-cad-modal" role="dialog" aria-label="Adjust sprint cadence">
+        <div class="bl-crud-head">
+          <span class="bl-crud-title">Adjust cadence${sprintId ? ' · ' + escHtml(sprintId) : ''}</span>
+          <button class="bl-crud-x" id="bl-cad-close" type="button" title="Close (Esc)">✕</button>
+        </div>
+        <div class="bl-crud-body">${bodyHtml}</div>
+        <div class="bl-crud-foot">
+          <button class="bl-crud-cancel-btn" id="bl-cad-cancel" type="button">Cancel</button>
+          <button class="bl-crud-save-btn${m.saving ? ' bl-crud-saving' : ''}" id="bl-cad-save" type="button" ${canSave ? '' : 'disabled'}>
+            ${m.saving ? '…saving' : 'Apply cadence change'}
+          </button>
+        </div>
+      </div>
+    </div>`;
+  }
+
   // ── Main render entry point ────────────────────
 
   async function render(container, opts) {
     opts = opts || {};
+    state._idxCardsMemo = undefined;   // #212 — fresh index per render pass (writes must show)
+    // dc6 — seed filter state from URL hash (before opts so opts take precedence)
+    readFilterFromHash();
     // Allow callers (e.g. SprintView delegation) to preset state
     if (opts.sprintFilter) state.sprintFilter = opts.sprintFilter;
     if (opts.vmMode)       state.vmMode = opts.vmMode;
@@ -2009,13 +3450,52 @@ window.BacklogView = (() => {
         return;
       }
       state.items = parseBacklog(md);
+      // S120 P3c — product-scoped embed (Product Home Backlog tab): caller injects
+      // read-only feature items + presets/locks the product filter; filter-state URL
+      // writes stay on the product route.
+      if (opts.extraItems && opts.extraItems.length) {
+        const ids = new Set(state.items.map(i => String(i.id)));
+        state.items = state.items.concat(opts.extraItems.filter(x => !ids.has(String(x.id))));
+      }
+      state.scopedRoute = opts.scopedRoute || null;
+      if (opts.productFilter) state.productFilter = opts.productFilter;
+      else if (state.scopedProductName) state.productFilter = 'All'; // left the scoped embed — unpin
+      state.scopedProductName = opts.productFilter || null;
       state.products = extractProducts(state.items);
       state.sessionTypes = extractSessionTypes(state.items);
 
       // Try to load active sprint (non-fatal if absent)
       try { state.activeSprint = await loadActiveSprint(); } catch { state.activeSprint = null; }
 
+      // #192 — load the coverage-registry INTERFACE source (CP contract). Fail-soft to
+      // empty {} → AutoTest badges render as "pending" (the empty-registry DoD). When
+      // #196 stands up the real registry it swaps in behind this same read with no
+      // card-side change. Read from the active sprint branch (falls back to default).
+      try {
+        const regBranch = state.activeSprint && state.activeSprint.branch;
+        const regRaw = await Repos.getFile(CONFIG.username, state.backlogRepo, 'docs/test-coverage-registry.json', regBranch || undefined);
+        state.coverageRegistry = regRaw ? (JSON.parse(regRaw).coverage || {}) : {};
+      } catch { state.coverageRegistry = {}; }
+
       fullRender(container);
+
+      // #185 t5 — subscribe to repo-change reactivity once per mount. Unsubscribe
+      // any previous listener first (render() can be called repeatedly — retry
+      // button, filter changes that re-render, etc.) so exactly one interval is
+      // ever active. No-op unsubscribe/subscribe when Repos.onChange has nothing
+      // to offer (e.g. deployed mode with no local adapter) — see app/repos.js.
+      if (_unsubscribeOnChange) { _unsubscribeOnChange(); _unsubscribeOnChange = null; }
+      if (typeof Repos.onChange === 'function') {
+        _unsubscribeOnChange = Repos.onChange(() => render(container, opts));
+      }
+
+      // openEditFor deferred open: if navigated here from card detail page
+      if (_pendingEditId) {
+        const pid = _pendingEditId;
+        _pendingEditId = null;
+        const pendingItem = state.items.find(i => i.id === pid);
+        if (pendingItem) openCrudModal(container, 'edit', pendingItem);
+      }
     } catch (err) {
       container.innerHTML = `<div class="bl-empty">
         <div class="bl-empty-glyph">✕</div>
@@ -2026,7 +3506,19 @@ window.BacklogView = (() => {
     }
   }
 
+  // #134 — Public method so card.js "✎ Edit" button can open the edit modal
+  function openEditFor(container, id) {
+    const strId = String(id);
+    if (container && container.querySelector('#bl-main-canvas') && state.items.length) {
+      const item = state.items.find(i => i.id === strId);
+      if (item) { openCrudModal(container, 'edit', item); return; }
+    }
+    // BacklogView not yet rendered in container — flag for deferred open then navigate
+    _pendingEditId = strId;
+    if (typeof navigate === 'function') navigate('backlog');
+  }
+
   // S061/#119 debug-only accessor — exposes internal state for preview_eval introspection.
   // Safe to keep: read-only reference; consumers may snapshot via JSON.stringify.
-  return { render, _debugState: () => state, parseFrontmatter, deriveCardStatus, sessionsFromCards };
+  return { render, openEditFor, _debugState: () => state, parseFrontmatter, deriveCardStatus, sessionsFromCards };
 })();

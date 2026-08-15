@@ -70,6 +70,26 @@ const Repos = (() => {
     return _adapters;
   }
 
+  // ── Local read-path (#185) ──────────────────────
+  // Not part of ADAPTER_REGISTRY / owner-routing (_adapterFor) — it isn't
+  // owner-scoped, it's a transport preference for whichever repo this app
+  // happens to be running against locally. Read-only: only getFile() consults
+  // it, and only for the calls it actually serves (it returns null for a
+  // branch mismatch or when no marker file is reachable, which falls through
+  // to the normal remote-adapter path below unchanged). getFileWithSha()/
+  // putFile() never consult it — a locally-served "sha" would be meaningless
+  // to a remote provider's conflict-detection.
+  let _localAdapter = undefined;  // undefined = not yet probed; null = probed, unavailable
+
+  function _getLocalAdapter() {
+    if (_localAdapter === undefined) {
+      _localAdapter = (typeof LocalAdapter !== 'undefined' && LocalAdapter.isAvailable())
+        ? new LocalAdapter()
+        : null;
+    }
+    return _localAdapter;
+  }
+
   function _primary() {
     const adapters = _init();
     return (adapters.find(a => a.cfg.primary) || adapters[0]).adapter;
@@ -126,9 +146,41 @@ const Repos = (() => {
     return _adapterFor(owner).getIssues(owner, repo);
   }
 
-  /** Get file content — routes by owner. Optional `branch` reads a specific ref (GitHub only for now). */
+  /** Get file content — prefers the local adapter (#185) when available and the
+   *  requested branch matches what's actually checked out; otherwise routes by
+   *  owner to the configured remote adapter exactly as before. */
   async function getFile(owner, repo, path, branch) {
+    const local = _getLocalAdapter();
+    if (local) {
+      const result = await local.getFile(owner, repo, path, branch);
+      if (result !== null) return result;
+      // null = no marker reachable, or branch mismatch — fall through to remote.
+    }
     return _adapterFor(owner).getFile(owner, repo, path, branch);
+  }
+
+  /** Subscribe to "the repo changed" (#185). Prefers the local adapter's
+   *  filesystem-backed signal when available; otherwise a documented no-op
+   *  (remote-provider reactivity — e.g. polling getCommits — is a future
+   *  extension, not implemented in this pass). Returns an unsubscribe fn. */
+  function onChange(cb, opts) {
+    const local = _getLocalAdapter();
+    if (local && typeof local.onChange === 'function') {
+      return local.onChange(cb, opts);
+    }
+    return () => {};  // no-op unsubscribe — nothing was subscribed
+  }
+
+  /** Read current sync state (#185 t9) for an initial UI render — returns
+   *  {branch, headSha, originSha, dirty, syncState, updatedAt} or null when
+   *  no local adapter is available (deployed mode — no sync-state concept
+   *  exists there today, so the UI badge simply doesn't render). */
+  async function getSyncState() {
+    const local = _getLocalAdapter();
+    if (local && typeof local.getState === 'function') {
+      return local.getState();
+    }
+    return null;
   }
 
 
@@ -174,6 +226,6 @@ const Repos = (() => {
     return adapter.listDirectory(owner, repo, path, branch);
   }
 
-  return { getUser, listRepos, getRepo, getCommits, getIssues, getFile, getFileWithSha, putFile, getRateLimit, listBranches, listDirectory };
+  return { getUser, listRepos, getRepo, getCommits, getIssues, getFile, getFileWithSha, putFile, getRateLimit, listBranches, listDirectory, onChange, getSyncState };
 
 })();
