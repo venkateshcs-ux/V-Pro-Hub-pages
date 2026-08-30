@@ -1,15 +1,21 @@
 [
-  {"card": "170", "title": "Shreemantra Project mint + Phase 0 working-methods — Heraizen B2B2C Healing Domain Expert PM collab", "slug": "s/scn-170-5dd076bc6ed1.html", "refreshed_at": "2026-08-22T09:47:02Z"}
+  {"card": "170", "title": "Shreemantra Project mint + Phase 0 working-methods — Heraizen B2B2C Healing Domain Expert PM collab", "slug": "s/scn-170-5dd076bc6ed1.html", "refreshed_at": "2026-08-30T14:58:13Z"}
 ,
-  {"card": "179", "title": "Playwright UI-automation suite — Heraizen HSM (close the UI-layer gap on #170)", "slug": "s/scn-179-03a1bee616bb.html", "refreshed_at": "2026-08-22T09:47:03Z"}
+  {"card": "179", "title": "Playwright UI-automation suite — Heraizen HSM (close the UI-layer gap on #170)", "slug": "s/scn-179-03a1bee616bb.html", "refreshed_at": "2026-08-30T14:58:14Z"}
 ,
-  {"card": "180", "title": "One-click 'Run e2e + refresh status' button on #170 details page (local-agent backed)", "slug": "s/scn-180-5888fa0c0317.html", "refreshed_at": "2026-08-22T09:47:04Z"}
+  {"card": "180", "title": "One-click 'Run e2e + refresh status' button on #170 details page (local-agent backed)", "slug": "s/scn-180-5888fa0c0317.html", "refreshed_at": "2026-08-30T14:58:16Z"}
 ,
-  {"card": "181", "title": "Reusable auto-test infra — seed data + cleanup wrapper (FIRST CONTRIBUTION to Heraizen HSM repo; pattern reusable)", "slug": "s/scn-181-1a83d9299dac.html", "refreshed_at": "2026-08-22T09:47:05Z"}
+  {"card": "181", "title": "Reusable auto-test infra — seed data + cleanup wrapper (FIRST CONTRIBUTION to Heraizen HSM repo; pattern reusable)", "slug": "s/scn-181-1a83d9299dac.html", "refreshed_at": "2026-08-30T14:58:17Z"}
 ,
-  {"card": "206", "title": "Heraizen counterparty dependencies — write path + go-live asks register", "slug": "s/scn-206-7a001b14a382.html", "refreshed_at": "2026-08-22T09:47:06Z"}
+  {"card": "206", "title": "Heraizen counterparty dependencies — write path + go-live asks register", "slug": "s/scn-206-7a001b14a382.html", "refreshed_at": "2026-08-30T14:58:18Z"}
 ,
-  {"card": "208", "title": "DEFECT D1 — self-registration payment records SUCCESS but creates no account / sends no credential email", "slug": "s/scn-208-20059b135703.html", "refreshed_at": "2026-08-22T09:47:07Z"}
+  {"card": "208", "title": "DEFECT D1 — self-registration payment records SUCCESS but creates no account / sends no credential email", "slug": "s/scn-208-20059b135703.html", "refreshed_at": "2026-08-30T14:58:19Z"}
 ,
-  {"card": "209", "title": "DEFECT D2 — elapsed live session does not auto-complete on refresh (400)", "slug": "s/scn-209-6d11549fb873.html", "refreshed_at": "2026-08-22T09:47:08Z"}
+  {"card": "209", "title": "DEFECT D2 — elapsed live session does not auto-complete on refresh (400)", "slug": "s/scn-209-6d11549fb873.html", "refreshed_at": "2026-08-30T14:58:21Z"}
+,
+  {"card": "226", "title": "Rename Patient to Student Volunteer across the Shreemantra codebase", "slug": "s/scn-226-51a912b3907a.html", "refreshed_at": "2026-08-30T14:58:22Z"}
+,
+  {"card": "227", "title": "Registration document handling — uploads fail in production, and nobody can read what is uploaded", "slug": "s/scn-227-111de4e2f5ab.html", "refreshed_at": "2026-08-30T14:58:23Z"}
+,
+  {"card": "228", "title": "Derisk the standalone datastore — accepted at launch scale, with an expiry that fires itself", "slug": "s/scn-228-be0ee4399c8b.html", "refreshed_at": "2026-08-30T14:58:24Z"}
 ]
